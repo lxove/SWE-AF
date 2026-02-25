@@ -1029,7 +1029,8 @@ async def execute(
 
 @app.reasoner()
 async def resume_build(
-    repo_path: str,
+    repo_path: str = "",
+    repo_url: str = "",
     artifacts_dir: str = ".artifacts",
     config: dict | None = None,
     git_config: dict | None = None,
@@ -1037,8 +1038,18 @@ async def resume_build(
     """Resume a crashed build from the last checkpoint.
 
     Loads the plan result from artifacts and calls execute with resume=True.
+
+    If ``repo_url`` is provided and ``repo_path`` is empty, the repo path is
+    derived as ``/workspaces/<repo-name>`` (same convention as ``build``).
     """
     import json
+
+    # Auto-derive repo_path from repo_url when not specified (mirrors build())
+    if repo_url and not repo_path:
+        repo_path = f"/workspaces/{_repo_name_from_url(repo_url)}"
+
+    if not repo_path:
+        raise ValueError("Either repo_path or repo_url must be provided")
 
     base = os.path.join(os.path.abspath(repo_path), artifacts_dir)
 
