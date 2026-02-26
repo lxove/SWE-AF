@@ -43,14 +43,20 @@ async def _call_with_timeout(coro, timeout: int = 2700, label: str = ""):
 # ---------------------------------------------------------------------------
 
 
-def _iteration_state_path(artifacts_dir: str, issue_name: str) -> str:
+def _iteration_state_path(artifacts_dir: str, issue_name: str, build_id: str = "") -> str:
     if not artifacts_dir:
         return ""
+    if build_id:
+        # Scope iteration checkpoints by build_id so parallel/sequential builds
+        # against the same repo do not resume stale state from prior runs.
+        return os.path.join(
+            artifacts_dir, "execution", "iterations", build_id, f"{issue_name}.json",
+        )
     return os.path.join(artifacts_dir, "execution", "iterations", f"{issue_name}.json")
 
 
-def _save_iteration_state(artifacts_dir: str, issue_name: str, state: dict) -> None:
-    path = _iteration_state_path(artifacts_dir, issue_name)
+def _save_iteration_state(artifacts_dir: str, issue_name: str, state: dict, build_id: str = "") -> None:
+    path = _iteration_state_path(artifacts_dir, issue_name, build_id=build_id)
     if not path:
         return
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -58,8 +64,8 @@ def _save_iteration_state(artifacts_dir: str, issue_name: str, state: dict) -> N
         json.dump(state, f, indent=2, default=str)
 
 
-def _load_iteration_state(artifacts_dir: str, issue_name: str) -> dict | None:
-    path = _iteration_state_path(artifacts_dir, issue_name)
+def _load_iteration_state(artifacts_dir: str, issue_name: str, build_id: str = "") -> dict | None:
+    path = _iteration_state_path(artifacts_dir, issue_name, build_id=build_id)
     if not path or not os.path.exists(path):
         return None
     with open(path, "r") as f:
@@ -574,7 +580,7 @@ async def run_coding_loop(
     is_first_success = len(dag_state.completed_issues) == 0
 
     # Resume from iteration checkpoint if available
-    existing_state = _load_iteration_state(dag_state.artifacts_dir, issue_name)
+    existing_state = _load_iteration_state(dag_state.artifacts_dir, issue_name, build_id=dag_state.build_id)
     if existing_state:
         start_iteration = existing_state.get("iteration", 0) + 1
         feedback = existing_state.get("feedback", "")
@@ -717,7 +723,7 @@ async def run_coding_loop(
             "feedback": summary,
             "files_changed": files_changed,
             "iteration_history": iteration_history,
-        })
+        }, build_id=dag_state.build_id)
 
         # --- 3. WRITE TO MEMORY ---
         if action == "approve":
