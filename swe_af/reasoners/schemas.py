@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from enum import Enum
+
 from pydantic import BaseModel
 
 
@@ -101,3 +103,37 @@ class PlanResult(BaseModel):
     file_conflicts: list[dict] = []  # Informational only — merger agent handles resolution
     artifacts_dir: str
     rationale: str
+
+
+class PlanningPhase(str, Enum):
+    """Ordered phases of the planning pipeline for checkpoint tracking."""
+
+    PM = "pm"
+    ARCHITECT = "architect"
+    TECH_LEAD_REVIEW = "tech_lead_review"
+    SPRINT_PLANNER = "sprint_planner"
+    LEVEL_COMPUTATION = "level_computation"
+    ISSUE_WRITERS = "issue_writers"
+    COMPLETE = "complete"
+
+
+# Ordered list for comparison — index determines "at or past" semantics.
+_PHASE_ORDER: list[PlanningPhase] = list(PlanningPhase)
+
+
+class PlanningCheckpoint(BaseModel):
+    """Lightweight checkpoint saved after each planning phase completes."""
+
+    completed_phase: PlanningPhase
+    prd: dict | None = None
+    architecture: dict | None = None
+    review: dict | None = None
+    review_iteration: int = 0
+    sprint_result: dict | None = None
+    issues: list[dict] | None = None
+    levels: list[list[str]] | None = None
+    file_conflicts: list[dict] | None = None
+    rationale: str = ""
+    written_issue_names: list[str] = []
+    artifacts_dir: str = ""
+    goal_hash: str = ""
