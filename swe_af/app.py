@@ -292,9 +292,9 @@ async def build(
 
     # Unique ID for this build — namespaces git branches/worktrees to prevent
     # collisions when multiple builds run concurrently on the same repository.
-    build_id = uuid.uuid4().hex[:8]
+    workflow_id = uuid.uuid4().hex[:8]
 
-    app.note(f"Build starting (build_id={build_id})", tags=["build", "start"])
+    app.note(f"Build starting (workflow_id={workflow_id})", tags=["build", "start"])
 
     # Compute absolute artifacts directory path for logging
     abs_artifacts_dir = os.path.join(os.path.abspath(repo_path), artifacts_dir)
@@ -356,7 +356,7 @@ async def build(
             permission_mode=cfg.permission_mode,
             ai_provider=cfg.ai_provider,
             previous_error=previous_error,
-            build_id=build_id,
+            workflow_id=workflow_id,
         )
 
         # Run planning only on first attempt, then just git_init on retries
@@ -429,7 +429,7 @@ async def build(
         execute_fn_target=cfg.execute_fn_target,
         config=exec_config,
         git_config=git_config,
-        build_id=build_id,
+        workflow_id=workflow_id,
         workspace_manifest=manifest.model_dump() if manifest else None,
     ), "execute")
 
@@ -975,7 +975,7 @@ async def execute(
     config: dict | None = None,
     git_config: dict | None = None,
     resume: bool = False,
-    build_id: str = "",
+    workflow_id: str = "",
     workspace_manifest: dict | None = None,
 ) -> dict:
     """Execute a planned DAG with self-healing replanning.
@@ -1021,7 +1021,7 @@ async def execute(
         node_id=NODE_ID,
         git_config=git_config,
         resume=resume,
-        build_id=build_id,
+        workflow_id=workflow_id,
         workspace_manifest=workspace_manifest,
     )
     return state.model_dump()

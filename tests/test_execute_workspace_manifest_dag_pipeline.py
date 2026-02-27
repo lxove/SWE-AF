@@ -884,7 +884,7 @@ class TestExecuteFunctionIsCorrectlyDefined:
         params = set(sig.parameters.keys())
 
         required_params = {"plan_result", "repo_path", "workspace_manifest"}
-        optional_params = {"execute_fn_target", "config", "git_config", "resume", "build_id"}
+        optional_params = {"execute_fn_target", "config", "git_config", "resume", "workflow_id"}
 
         for p in required_params:
             assert p in params, f"execute()._original_func must have '{p}' parameter"
