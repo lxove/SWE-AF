@@ -16,6 +16,7 @@ import uuid
 from swe_af.reasoners import router
 from swe_af.reasoners.pipeline import _assign_sequence_numbers, _compute_levels, _load_plan_checkpoint, _save_plan_checkpoint, _validate_file_conflicts
 from swe_af.reasoners.schemas import PlanCheckpoint, PlanResult, ReviewResult
+from swe_af.workflow_registry import register_workflow, update_workflow
 
 from agentfield import Agent
 from swe_af.execution.envelope import unwrap_call_result as _unwrap
@@ -294,6 +295,32 @@ async def build(
     # collisions when multiple builds run concurrently on the same repository.
     workflow_id = uuid.uuid4().hex[:8]
 
+    register_workflow(workflow_id, repo_path, artifacts_dir, goal)
+
+    try:
+        result = await _build_body(
+            app, cfg, resolved, goal, repo_path, artifacts_dir,
+            additional_context, workflow_id,
+        )
+    except BaseException:
+        update_workflow(workflow_id, status="failed")
+        raise
+
+    update_workflow(workflow_id, status="completed")
+    return result
+
+
+async def _build_body(
+    app: Agent,
+    cfg: BuildConfig,
+    resolved: dict,
+    goal: str,
+    repo_path: str,
+    artifacts_dir: str,
+    additional_context: str,
+    workflow_id: str,
+) -> dict:
+    """Inner build logic, extracted so build() can wrap it in try/except."""
     app.note(f"Build starting (workflow_id={workflow_id})", tags=["build", "start"])
 
     # Compute absolute artifacts directory path for logging
@@ -421,6 +448,7 @@ async def build(
         )
 
     # 2. EXECUTE
+    update_workflow(workflow_id, status="executing")
     exec_config = cfg.to_execution_config_dict()
 
     dag_result = _unwrap(await app.call(

@@ -25,6 +25,7 @@ from swe_af.reasoners.schemas import (
     PRD,
     ReviewResult,
 )
+from swe_af.workflow_registry import update_workflow
 
 from . import router
 
@@ -63,6 +64,7 @@ def _save_plan_checkpoint(checkpoint: PlanCheckpoint) -> None:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise
+    update_workflow(checkpoint.workflow_id, status="planning")
 
 
 def _load_plan_checkpoint(artifacts_dir: str) -> PlanCheckpoint | None:
