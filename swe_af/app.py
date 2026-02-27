@@ -14,7 +14,7 @@ import subprocess
 import uuid
 
 from swe_af.reasoners import router
-from swe_af.reasoners.pipeline import _assign_sequence_numbers, _compute_levels, _save_plan_checkpoint, _validate_file_conflicts
+from swe_af.reasoners.pipeline import _assign_sequence_numbers, _compute_levels, _load_plan_checkpoint, _save_plan_checkpoint, _validate_file_conflicts
 from swe_af.reasoners.schemas import PlanCheckpoint, PlanResult, ReviewResult
 
 from agentfield import Agent
@@ -814,188 +814,302 @@ async def plan(
     """
     app.note("Pipeline starting", tags=["pipeline", "start"])
 
-    # Initialize plan checkpoint
+    # Phase ordering for checkpoint comparisons
+    _PHASE_ORDER = {"": 0, "pm": 1, "tech_lead": 2, "sprint_planner": 3, "issue_writers": 4}
+
+    # Load existing checkpoint or create a new one
     artifacts_dir_abs = os.path.join(os.path.abspath(repo_path), artifacts_dir)
-    checkpoint = PlanCheckpoint(
-        workflow_id=workflow_id,
-        goal=goal,
-        repo_path=repo_path,
-        artifacts_dir=artifacts_dir_abs,
-        workspace_manifest=workspace_manifest,
-    )
+    existing_checkpoint = _load_plan_checkpoint(artifacts_dir_abs)
+    if existing_checkpoint is not None:
+        checkpoint = existing_checkpoint
+        app.note(
+            f"Resuming plan from phase='{checkpoint.phase}', "
+            f"sub_phase='{checkpoint.review_loop_sub_phase}'",
+            tags=["pipeline", "resume"],
+        )
+    else:
+        checkpoint = PlanCheckpoint(
+            workflow_id=workflow_id,
+            goal=goal,
+            repo_path=repo_path,
+            artifacts_dir=artifacts_dir_abs,
+            workspace_manifest=workspace_manifest,
+        )
+
+    def _phase_at_least(phase: str) -> bool:
+        return _PHASE_ORDER.get(checkpoint.phase, 0) >= _PHASE_ORDER.get(phase, 0)
 
     # 1. PM scopes the goal into a PRD
-    app.note("Phase 1: Product Manager", tags=["pipeline", "pm"])
-    prd = _unwrap(await app.call(
-        f"{NODE_ID}.run_product_manager",
-        goal=goal,
-        repo_path=repo_path,
-        artifacts_dir=artifacts_dir,
-        additional_context=additional_context,
-        model=pm_model,
-        permission_mode=permission_mode,
-        ai_provider=ai_provider,
-        workspace_manifest=workspace_manifest,
-    ), "run_product_manager")
-    checkpoint.prd = prd
-    checkpoint.phase = "pm"
-    _save_plan_checkpoint(checkpoint)
-
-    # 2. Architect designs the solution
-    app.note("Phase 2: Architect", tags=["pipeline", "architect"])
-    arch = _unwrap(await app.call(
-        f"{NODE_ID}.run_architect",
-        prd=prd,
-        repo_path=repo_path,
-        artifacts_dir=artifacts_dir,
-        model=architect_model,
-        permission_mode=permission_mode,
-        ai_provider=ai_provider,
-        workspace_manifest=workspace_manifest,
-    ), "run_architect")
-    checkpoint.architecture_revisions.append(arch)
-    checkpoint.architecture = arch
-    checkpoint.review_loop_sub_phase = "architect_done"
-    _save_plan_checkpoint(checkpoint)
-
-    # 3. Tech Lead review loop
-    review = None
-    for i in range(max_review_iterations + 1):
-        app.note(f"Phase 3: Tech Lead review (iteration {i})", tags=["pipeline", "tech_lead"])
-        review = _unwrap(await app.call(
-            f"{NODE_ID}.run_tech_lead",
-            prd=prd,
+    if _phase_at_least("pm"):
+        assert checkpoint.prd is not None, "Checkpoint phase >= 'pm' but prd is None"
+        prd = checkpoint.prd
+        app.note("Skipping PM phase (resumed from checkpoint)", tags=["pipeline", "pm", "skip"])
+    else:
+        app.note("Phase 1: Product Manager", tags=["pipeline", "pm"])
+        prd = _unwrap(await app.call(
+            f"{NODE_ID}.run_product_manager",
+            goal=goal,
             repo_path=repo_path,
             artifacts_dir=artifacts_dir,
-            revision_number=i,
-            model=tech_lead_model,
+            additional_context=additional_context,
+            model=pm_model,
             permission_mode=permission_mode,
             ai_provider=ai_provider,
             workspace_manifest=workspace_manifest,
-        ), "run_tech_lead")
-        checkpoint.review_iterations.append(review)
-        checkpoint.review = review
-        checkpoint.review_loop_sub_phase = "tech_lead_done"
-        checkpoint.review_loop_iteration = i + 1
+        ), "run_product_manager")
+        checkpoint.prd = prd
+        checkpoint.phase = "pm"
         _save_plan_checkpoint(checkpoint)
-        if review["approved"]:
-            break
-        if i < max_review_iterations:
-            app.note(f"Architecture revision {i + 1}", tags=["pipeline", "revision"])
+
+    # 2+3. Architect ↔ Tech Lead loop
+    if _phase_at_least("tech_lead"):
+        # Entire loop already completed
+        assert checkpoint.architecture is not None, "Checkpoint phase >= 'tech_lead' but architecture is None"
+        assert checkpoint.review is not None, "Checkpoint phase >= 'tech_lead' but review is None"
+        arch = checkpoint.architecture
+        review = checkpoint.review
+        app.note(
+            "Skipping Architect/Tech Lead phases (resumed from checkpoint)",
+            tags=["pipeline", "arch_loop", "skip"],
+        )
+    else:
+        sub = checkpoint.review_loop_sub_phase
+        loop_start = checkpoint.review_loop_iteration
+
+        # Ensure we have an initial architecture
+        if not sub:
+            # No sub-phase means architect hasn't run yet
+            app.note("Phase 2: Architect", tags=["pipeline", "architect"])
             arch = _unwrap(await app.call(
                 f"{NODE_ID}.run_architect",
                 prd=prd,
                 repo_path=repo_path,
                 artifacts_dir=artifacts_dir,
-                feedback=review["feedback"],
                 model=architect_model,
                 permission_mode=permission_mode,
                 ai_provider=ai_provider,
                 workspace_manifest=workspace_manifest,
-            ), "run_architect (revision)")
+            ), "run_architect")
             checkpoint.architecture_revisions.append(arch)
             checkpoint.architecture = arch
             checkpoint.review_loop_sub_phase = "architect_done"
             _save_plan_checkpoint(checkpoint)
+        else:
+            assert checkpoint.architecture is not None, "Checkpoint has sub_phase but architecture is None"
+            arch = checkpoint.architecture
+            app.note(
+                f"Resuming Architect/Tech Lead at sub_phase='{sub}', "
+                f"loop_iteration={loop_start}",
+                tags=["pipeline", "resume"],
+            )
 
-    # Force-approve if we exhausted iterations
-    assert review is not None
-    if not review["approved"]:
-        review = ReviewResult(
-            approved=True,
-            feedback=review["feedback"],
-            scope_issues=review.get("scope_issues", []),
-            complexity_assessment=review.get("complexity_assessment", "appropriate"),
-            summary=review["summary"] + " [auto-approved after max iterations]",
-        ).model_dump()
-    checkpoint.phase = "tech_lead"
-    checkpoint.review = review
-    _save_plan_checkpoint(checkpoint)
+        review = checkpoint.review
+
+        # If tech_lead_done and already approved, skip the loop entirely
+        if sub == "tech_lead_done" and review and review["approved"]:
+            app.note(
+                "Tech Lead already approved (resumed from checkpoint)",
+                tags=["pipeline", "tech_lead", "skip"],
+            )
+        else:
+            # If tech_lead_done but not approved, do the pending architect revision
+            if sub == "tech_lead_done" and review and not review["approved"]:
+                prev_i = loop_start - 1
+                if prev_i < max_review_iterations:
+                    app.note(
+                        f"Architecture revision {prev_i + 1} (resumed)",
+                        tags=["pipeline", "revision"],
+                    )
+                    arch = _unwrap(await app.call(
+                        f"{NODE_ID}.run_architect",
+                        prd=prd,
+                        repo_path=repo_path,
+                        artifacts_dir=artifacts_dir,
+                        feedback=review["feedback"],
+                        model=architect_model,
+                        permission_mode=permission_mode,
+                        ai_provider=ai_provider,
+                        workspace_manifest=workspace_manifest,
+                    ), "run_architect (revision)")
+                    checkpoint.architecture_revisions.append(arch)
+                    checkpoint.architecture = arch
+                    checkpoint.review_loop_sub_phase = "architect_done"
+                    _save_plan_checkpoint(checkpoint)
+
+            # Run remaining tech lead review iterations
+            for i in range(loop_start, max_review_iterations + 1):
+                app.note(
+                    f"Phase 3: Tech Lead review (iteration {i})",
+                    tags=["pipeline", "tech_lead"],
+                )
+                review = _unwrap(await app.call(
+                    f"{NODE_ID}.run_tech_lead",
+                    prd=prd,
+                    repo_path=repo_path,
+                    artifacts_dir=artifacts_dir,
+                    revision_number=i,
+                    model=tech_lead_model,
+                    permission_mode=permission_mode,
+                    ai_provider=ai_provider,
+                    workspace_manifest=workspace_manifest,
+                ), "run_tech_lead")
+                checkpoint.review_iterations.append(review)
+                checkpoint.review = review
+                checkpoint.review_loop_sub_phase = "tech_lead_done"
+                checkpoint.review_loop_iteration = i + 1
+                _save_plan_checkpoint(checkpoint)
+                if review["approved"]:
+                    break
+                if i < max_review_iterations:
+                    app.note(
+                        f"Architecture revision {i + 1}",
+                        tags=["pipeline", "revision"],
+                    )
+                    arch = _unwrap(await app.call(
+                        f"{NODE_ID}.run_architect",
+                        prd=prd,
+                        repo_path=repo_path,
+                        artifacts_dir=artifacts_dir,
+                        feedback=review["feedback"],
+                        model=architect_model,
+                        permission_mode=permission_mode,
+                        ai_provider=ai_provider,
+                        workspace_manifest=workspace_manifest,
+                    ), "run_architect (revision)")
+                    checkpoint.architecture_revisions.append(arch)
+                    checkpoint.architecture = arch
+                    checkpoint.review_loop_sub_phase = "architect_done"
+                    _save_plan_checkpoint(checkpoint)
+
+        # Force-approve if we exhausted iterations
+        assert review is not None
+        if not review["approved"]:
+            review = ReviewResult(
+                approved=True,
+                feedback=review["feedback"],
+                scope_issues=review.get("scope_issues", []),
+                complexity_assessment=review.get("complexity_assessment", "appropriate"),
+                summary=review["summary"] + " [auto-approved after max iterations]",
+            ).model_dump()
+        checkpoint.phase = "tech_lead"
+        checkpoint.review = review
+        _save_plan_checkpoint(checkpoint)
 
     # 4. Sprint planner decomposes into issues
-    app.note("Phase 4: Sprint Planner", tags=["pipeline", "sprint_planner"])
-    sprint_result = _unwrap(await app.call(
-        f"{NODE_ID}.run_sprint_planner",
-        prd=prd,
-        architecture=arch,
-        repo_path=repo_path,
-        artifacts_dir=artifacts_dir,
-        model=sprint_planner_model,
-        permission_mode=permission_mode,
-        ai_provider=ai_provider,
-        workspace_manifest=workspace_manifest,
-    ), "run_sprint_planner")
-    issues = sprint_result["issues"]
-    rationale = sprint_result["rationale"]
-
-    # 5. Compute parallel execution levels & assign sequence numbers BEFORE issue writing
-    levels = _compute_levels(issues)
-    issues = _assign_sequence_numbers(issues, levels)
-    file_conflicts = _validate_file_conflicts(issues, levels)
-
-    checkpoint.sprint_plan = sprint_result
-    checkpoint.levels = levels
-    checkpoint.phase = "sprint_planner"
-    _save_plan_checkpoint(checkpoint)
-
-    # 4b. Parallel issue writing (issues now have sequence_number set)
-    base = os.path.join(os.path.abspath(repo_path), artifacts_dir)
-    issues_dir = os.path.join(base, "plan", "issues")
-    prd_path = os.path.join(base, "plan", "prd.md")
-    architecture_path = os.path.join(base, "plan", "architecture.md")
-    os.makedirs(issues_dir, exist_ok=True)
-
-    prd_summary_str = prd.get("validated_description", "")
-    prd_ac = prd.get("acceptance_criteria", [])
-    if prd_ac:
-        prd_summary_str += "\n\nAcceptance Criteria:\n" + "\n".join(f"- {c}" for c in prd_ac)
-
-    app.note(
-        f"Phase 4b: Writing {len(issues)} issue files in parallel",
-        tags=["pipeline", "issue_writers"],
-    )
-
-    # Issue writer progress tracking with lock
-    checkpoint_lock = asyncio.Lock()
-
-    async def _write_issue_with_checkpoint(issue: dict) -> dict:
-        siblings = [
-            {"name": i["name"], "title": i.get("title", ""), "provides": i.get("provides", [])}
-            for i in issues if i["name"] != issue["name"]
-        ]
-        result = await app.call(
-            f"{NODE_ID}.run_issue_writer",
-            issue=issue,
-            prd_summary=prd_summary_str,
-            architecture_summary=arch.get("summary", ""),
-            issues_dir=issues_dir,
+    if _phase_at_least("sprint_planner"):
+        assert checkpoint.sprint_plan is not None, "Checkpoint phase >= 'sprint_planner' but sprint_plan is None"
+        assert checkpoint.levels is not None, "Checkpoint phase >= 'sprint_planner' but levels is None"
+        sprint_result = checkpoint.sprint_plan
+        levels = checkpoint.levels
+        issues = sprint_result["issues"]
+        rationale = sprint_result["rationale"]
+        issues = _assign_sequence_numbers(issues, levels)
+        file_conflicts = _validate_file_conflicts(issues, levels)
+        app.note(
+            "Skipping Sprint Planner (resumed from checkpoint)",
+            tags=["pipeline", "sprint_planner", "skip"],
+        )
+    else:
+        app.note("Phase 4: Sprint Planner", tags=["pipeline", "sprint_planner"])
+        sprint_result = _unwrap(await app.call(
+            f"{NODE_ID}.run_sprint_planner",
+            prd=prd,
+            architecture=arch,
             repo_path=repo_path,
-            prd_path=prd_path,
-            architecture_path=architecture_path,
-            sibling_issues=siblings,
-            model=issue_writer_model,
+            artifacts_dir=artifacts_dir,
+            model=sprint_planner_model,
             permission_mode=permission_mode,
             ai_provider=ai_provider,
             workspace_manifest=workspace_manifest,
+        ), "run_sprint_planner")
+        issues = sprint_result["issues"]
+        rationale = sprint_result["rationale"]
+
+        # 5. Compute parallel execution levels & assign sequence numbers BEFORE issue writing
+        levels = _compute_levels(issues)
+        issues = _assign_sequence_numbers(issues, levels)
+        file_conflicts = _validate_file_conflicts(issues, levels)
+
+        checkpoint.sprint_plan = sprint_result
+        checkpoint.levels = levels
+        checkpoint.phase = "sprint_planner"
+        _save_plan_checkpoint(checkpoint)
+
+    # 4b. Parallel issue writing (issues now have sequence_number set)
+    base = artifacts_dir_abs
+    if checkpoint.phase == "issue_writers":
+        app.note(
+            "Skipping issue writers (resumed from checkpoint)",
+            tags=["pipeline", "issue_writers", "skip"],
         )
-        if isinstance(result, dict) and result.get("success"):
-            async with checkpoint_lock:
-                checkpoint.issue_writer_progress.append(issue["name"])
-                _save_plan_checkpoint(checkpoint)
-        return result
+    else:
+        issues_dir = os.path.join(base, "plan", "issues")
+        prd_path = os.path.join(base, "plan", "prd.md")
+        architecture_path = os.path.join(base, "plan", "architecture.md")
+        os.makedirs(issues_dir, exist_ok=True)
 
-    writer_tasks = [_write_issue_with_checkpoint(issue) for issue in issues]
-    writer_results = await asyncio.gather(*writer_tasks, return_exceptions=True)
+        prd_summary_str = prd.get("validated_description", "")
+        prd_ac = prd.get("acceptance_criteria", [])
+        if prd_ac:
+            prd_summary_str += "\n\nAcceptance Criteria:\n" + "\n".join(f"- {c}" for c in prd_ac)
 
-    succeeded = sum(1 for r in writer_results if isinstance(r, dict) and r.get("success"))
-    failed = len(writer_results) - succeeded
-    app.note(
-        f"Issue writers complete: {succeeded} succeeded, {failed} failed",
-        tags=["pipeline", "issue_writers", "complete"],
-    )
+        # Filter out already-written issues from a previous run
+        completed_issues = set(checkpoint.issue_writer_progress)
+        remaining_issues = [issue for issue in issues if issue["name"] not in completed_issues]
 
-    checkpoint.phase = "issue_writers"
-    _save_plan_checkpoint(checkpoint)
+        if completed_issues:
+            app.note(
+                f"Resuming issue writers: {len(completed_issues)} already done, "
+                f"{len(remaining_issues)} remaining",
+                tags=["pipeline", "issue_writers", "resume"],
+            )
+        else:
+            app.note(
+                f"Phase 4b: Writing {len(issues)} issue files in parallel",
+                tags=["pipeline", "issue_writers"],
+            )
+
+        # Issue writer progress tracking with lock
+        checkpoint_lock = asyncio.Lock()
+
+        async def _write_issue_with_checkpoint(issue: dict) -> dict:
+            siblings = [
+                {"name": i["name"], "title": i.get("title", ""), "provides": i.get("provides", [])}
+                for i in issues if i["name"] != issue["name"]
+            ]
+            result = await app.call(
+                f"{NODE_ID}.run_issue_writer",
+                issue=issue,
+                prd_summary=prd_summary_str,
+                architecture_summary=arch.get("summary", ""),
+                issues_dir=issues_dir,
+                repo_path=repo_path,
+                prd_path=prd_path,
+                architecture_path=architecture_path,
+                sibling_issues=siblings,
+                model=issue_writer_model,
+                permission_mode=permission_mode,
+                ai_provider=ai_provider,
+                workspace_manifest=workspace_manifest,
+            )
+            if isinstance(result, dict) and result.get("success"):
+                async with checkpoint_lock:
+                    checkpoint.issue_writer_progress.append(issue["name"])
+                    _save_plan_checkpoint(checkpoint)
+            return result
+
+        writer_tasks = [_write_issue_with_checkpoint(issue) for issue in remaining_issues]
+        writer_results = await asyncio.gather(*writer_tasks, return_exceptions=True)
+
+        succeeded = sum(1 for r in writer_results if isinstance(r, dict) and r.get("success"))
+        failed = len(writer_results) - succeeded
+        app.note(
+            f"Issue writers complete: {succeeded} succeeded, {failed} failed",
+            tags=["pipeline", "issue_writers", "complete"],
+        )
+
+        checkpoint.phase = "issue_writers"
+        _save_plan_checkpoint(checkpoint)
 
     # 6. Write rationale to disk
     rationale_path = os.path.join(base, "rationale.md")
