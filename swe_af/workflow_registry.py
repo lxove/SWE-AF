@@ -1,4 +1,4 @@
-"""Global workflow registry mapping workflow_id to repo metadata.
+"""Global workflow registry mapping build_id to repo metadata.
 
 Stores entries in ``~/.swe-af/workflows.json`` with file-level locking
 so concurrent processes can safely read/write the registry.
@@ -56,7 +56,7 @@ def _now_iso() -> str:
 
 
 def register_workflow(
-    workflow_id: str,
+    build_id: str,
     repo_path: str,
     artifacts_dir: str,
     goal: str,
@@ -74,8 +74,8 @@ def register_workflow(
                 except (json.JSONDecodeError, ValueError):
                     data = {}
                 now = _now_iso()
-                data[workflow_id] = {
-                    "workflow_id": workflow_id,
+                data[build_id] = {
+                    "build_id": build_id,
                     "repo_path": repo_path,
                     "artifacts_dir": artifacts_dir,
                     "goal": goal,
@@ -92,7 +92,7 @@ def register_workflow(
         os.close(fd)
 
 
-def update_workflow(workflow_id: str, **kwargs: str) -> None:
+def update_workflow(build_id: str, **kwargs: str) -> None:
     """Update fields on an existing workflow entry.
 
     Accepts any subset of: status, repo_path, artifacts_dir, goal.
@@ -109,12 +109,12 @@ def update_workflow(workflow_id: str, **kwargs: str) -> None:
                     data = json.load(f)
                 except (json.JSONDecodeError, ValueError):
                     data = {}
-                if workflow_id not in data:
+                if build_id not in data:
                     return
                 for key, value in kwargs.items():
                     if key in allowed:
-                        data[workflow_id][key] = value
-                data[workflow_id]["updated_at"] = _now_iso()
+                        data[build_id][key] = value
+                data[build_id]["updated_at"] = _now_iso()
                 f.seek(0)
                 json.dump(data, f, indent=2, default=str)
                 f.truncate()
@@ -124,11 +124,11 @@ def update_workflow(workflow_id: str, **kwargs: str) -> None:
         os.close(fd)
 
 
-def lookup_workflow(workflow_id: str) -> dict | None:
-    """Return the entry dict for a workflow_id, or None if not found."""
+def lookup_workflow(build_id: str) -> dict | None:
+    """Return the entry dict for a build_id, or None if not found."""
     path = _registry_path()
     data = _read_registry(path)
-    return data.get(workflow_id)
+    return data.get(build_id)
 
 
 def list_workflows() -> list[dict]:

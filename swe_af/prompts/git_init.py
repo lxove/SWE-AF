@@ -84,15 +84,15 @@ Return a JSON object with:
 """
 
 
-def git_init_task_prompt(repo_path: str, goal: str, workflow_id: str = "") -> str:
+def git_init_task_prompt(repo_path: str, goal: str, build_id: str = "") -> str:
     """Build the task prompt for the git initialization agent."""
     sections: list[str] = []
 
     sections.append("## Repository Setup Task")
     sections.append(f"- **Repository path**: `{repo_path}`")
     sections.append(f"- **Project goal**: {goal}")
-    if workflow_id:
-        sections.append(f"- **Workflow ID**: `{workflow_id}` (prefix integration branch slug with this)")
+    if build_id:
+        sections.append(f"- **Build ID**: `{build_id}` (prefix integration branch slug with this)")
 
     sections.append(
         "\n## Your Task\n"

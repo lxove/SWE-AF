@@ -105,7 +105,7 @@ def workspace_setup_task_prompt(
     integration_branch: str,
     issues: list[dict],
     worktrees_dir: str,
-    workflow_id: str = "",
+    build_id: str = "",
     workspace_manifest: WorkspaceManifest | None = None,
 ) -> str:
     """Build the task prompt for the workspace setup agent."""
@@ -119,8 +119,8 @@ def workspace_setup_task_prompt(
     sections.append(f"- **Repository path**: `{repo_path}`")
     sections.append(f"- **Integration branch**: `{integration_branch}`")
     sections.append(f"- **Worktrees directory**: `{worktrees_dir}`")
-    if workflow_id:
-        sections.append(f"- **Workflow ID**: `{workflow_id}`")
+    if build_id:
+        sections.append(f"- **Build ID**: `{build_id}`")
 
     sections.append("\n### Issues to create worktrees for:")
     for issue in issues:
@@ -129,14 +129,14 @@ def workspace_setup_task_prompt(
         seq = str(issue.get("sequence_number") or 0).zfill(2)
         sections.append(f"- issue_name=`{name}`, seq=`{seq}`, title: {title}")
 
-    if workflow_id:
+    if build_id:
         worktree_cmd = (
-            f"git worktree add <worktrees_dir>/issue-{workflow_id}-<NN>-<name>"
-            f" -b issue/{workflow_id}-<NN>-<name> <integration_branch>"
+            f"git worktree add <worktrees_dir>/issue-{build_id}-<NN>-<name>"
+            f" -b issue/{build_id}-<NN>-<name> <integration_branch>"
         )
         branch_note = (
-            f"   Branch names MUST be prefixed with the Workflow ID: `issue/{workflow_id}-<NN>-<name>`\n"
-            f"   Worktree dirs MUST be prefixed with the Workflow ID: `issue-{workflow_id}-<NN>-<name>`\n"
+            f"   Branch names MUST be prefixed with the Build ID: `issue/{build_id}-<NN>-<name>`\n"
+            f"   Worktree dirs MUST be prefixed with the Build ID: `issue-{build_id}-<NN>-<name>`\n"
             "   This prevents collisions with other concurrent workflows on the same repository."
         )
     else:

@@ -113,7 +113,7 @@ class TestInitAllReposTwoRepos:
             node_id="swe-planner",
             git_model="sonnet",
             ai_provider="claude",
-            workflow_id="abc123",
+            build_id="abc123",
         ))
 
         assert call_fn.call_count == 2

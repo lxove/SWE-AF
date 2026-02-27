@@ -1,10 +1,10 @@
-"""Tests for the resume(workflow_id) entry point.
+"""Tests for the resume(build_id) entry point.
 
 Covers:
 - Resume with execution checkpoint only → calls execute with resume=True
 - Resume with plan checkpoint only → calls plan then execute
 - Resume with both checkpoints → uses execution checkpoint (takes precedence)
-- Resume with unknown workflow_id → raises RuntimeError
+- Resume with unknown build_id → raises RuntimeError
 - Resume with no checkpoints → raises RuntimeError
 
 Uses mocks for app.call, lookup_workflow, and filesystem checks.
@@ -95,7 +95,7 @@ def _write_plan_checkpoint(base: str, data: dict | None = None) -> str:
     os.makedirs(plan_dir, exist_ok=True)
     path = os.path.join(plan_dir, "checkpoint.json")
     content = data or {
-        "workflow_id": "test-wf",
+        "build_id": "test-wf",
         "goal": "Build a test app",
         "repo_path": "/tmp/test-repo",
         "artifacts_dir": ".artifacts",
@@ -113,16 +113,16 @@ def _write_plan_checkpoint(base: str, data: dict | None = None) -> str:
 
 
 class TestResumeUnknownWorkflow:
-    """Tests for resume with unknown or missing workflow_id."""
+    """Tests for resume with unknown or missing build_id."""
 
     @pytest.mark.asyncio
-    async def test_unknown_workflow_id_raises(self, mock_app_call, mock_app_note):
-        """resume raises RuntimeError for unknown workflow_id."""
+    async def test_unknown_build_id_raises(self, mock_app_call, mock_app_note):
+        """resume raises RuntimeError for unknown build_id."""
         resume_fn = _get_resume_fn()
 
         with patch("swe_af.app.lookup_workflow", return_value=None):
             with pytest.raises(RuntimeError, match="not found in registry"):
-                await resume_fn(workflow_id="nonexistent")
+                await resume_fn(build_id="nonexistent")
 
 
 class TestResumeNoCheckpoints:
@@ -136,7 +136,7 @@ class TestResumeNoCheckpoints:
         os.makedirs(repo_path, exist_ok=True)
 
         entry = {
-            "workflow_id": "wf-no-ckpt",
+            "build_id": "wf-no-ckpt",
             "repo_path": repo_path,
             "artifacts_dir": ".artifacts",
             "goal": "test",
@@ -144,7 +144,7 @@ class TestResumeNoCheckpoints:
 
         with patch("swe_af.app.lookup_workflow", return_value=entry):
             with pytest.raises(RuntimeError, match="No checkpoints found"):
-                await resume_fn(workflow_id="wf-no-ckpt")
+                await resume_fn(build_id="wf-no-ckpt")
 
 
 class TestResumeExecutionCheckpoint:
@@ -163,7 +163,7 @@ class TestResumeExecutionCheckpoint:
         _write_exec_checkpoint(base)
 
         entry = {
-            "workflow_id": "wf-exec",
+            "build_id": "wf-exec",
             "repo_path": repo_path,
             "artifacts_dir": ".artifacts",
             "goal": "test",
@@ -172,7 +172,7 @@ class TestResumeExecutionCheckpoint:
         mock_app_call.return_value = {"dag_result": "success"}
 
         with patch("swe_af.app.lookup_workflow", return_value=entry):
-            await resume_fn(workflow_id="wf-exec")
+            await resume_fn(build_id="wf-exec")
 
         # Should have called execute (the only app.call)
         assert mock_app_call.call_count == 1
@@ -196,7 +196,7 @@ class TestResumeExecutionCheckpoint:
         _write_plan_checkpoint(base)
 
         entry = {
-            "workflow_id": "wf-both",
+            "build_id": "wf-both",
             "repo_path": repo_path,
             "artifacts_dir": ".artifacts",
             "goal": "test",
@@ -205,7 +205,7 @@ class TestResumeExecutionCheckpoint:
         mock_app_call.return_value = {"dag_result": "success"}
 
         with patch("swe_af.app.lookup_workflow", return_value=entry):
-            await resume_fn(workflow_id="wf-both")
+            await resume_fn(build_id="wf-both")
 
         # Only one call (execute), not two (plan then execute)
         assert mock_app_call.call_count == 1
@@ -234,7 +234,7 @@ class TestResumeExecutionCheckpoint:
         )
 
         entry = {
-            "workflow_id": "wf-shape",
+            "build_id": "wf-shape",
             "repo_path": repo_path,
             "artifacts_dir": ".artifacts",
             "goal": "test",
@@ -243,7 +243,7 @@ class TestResumeExecutionCheckpoint:
         mock_app_call.return_value = {}
 
         with patch("swe_af.app.lookup_workflow", return_value=entry):
-            await resume_fn(workflow_id="wf-shape")
+            await resume_fn(build_id="wf-shape")
 
         call_args = mock_app_call.call_args
         plan_result = call_args[1]["plan_result"]
@@ -266,7 +266,7 @@ class TestResumePlanCheckpoint:
         base = os.path.join(repo_path, ".artifacts")
 
         _write_plan_checkpoint(base, {
-            "workflow_id": "wf-plan",
+            "build_id": "wf-plan",
             "goal": "Build something",
             "repo_path": repo_path,
             "artifacts_dir": ".artifacts",
@@ -275,7 +275,7 @@ class TestResumePlanCheckpoint:
         })
 
         entry = {
-            "workflow_id": "wf-plan",
+            "build_id": "wf-plan",
             "repo_path": repo_path,
             "artifacts_dir": ".artifacts",
             "goal": "Build something",
@@ -297,7 +297,7 @@ class TestResumePlanCheckpoint:
         mock_app_call.side_effect = [plan_result, exec_result]
 
         with patch("swe_af.app.lookup_workflow", return_value=entry):
-            await resume_fn(workflow_id="wf-plan")
+            await resume_fn(build_id="wf-plan")
 
         # Two calls: first plan, then execute
         assert mock_app_call.call_count == 2
@@ -305,7 +305,7 @@ class TestResumePlanCheckpoint:
         # First call is plan
         plan_call = mock_app_call.call_args_list[0]
         assert "plan" in plan_call[0][0]
-        assert plan_call[1]["workflow_id"] == "wf-plan"
+        assert plan_call[1]["build_id"] == "wf-plan"
 
         # Second call is execute
         exec_call = mock_app_call.call_args_list[1]
@@ -322,7 +322,7 @@ class TestResumePlanCheckpoint:
         base = os.path.join(repo_path, ".artifacts")
 
         _write_plan_checkpoint(base, {
-            "workflow_id": "wf-goal",
+            "build_id": "wf-goal",
             "goal": "Checkpoint goal",
             "repo_path": repo_path,
             "artifacts_dir": ".artifacts",
@@ -331,7 +331,7 @@ class TestResumePlanCheckpoint:
         })
 
         entry = {
-            "workflow_id": "wf-goal",
+            "build_id": "wf-goal",
             "repo_path": repo_path,
             "artifacts_dir": ".artifacts",
             "goal": "Registry goal",
@@ -350,7 +350,7 @@ class TestResumePlanCheckpoint:
         mock_app_call.side_effect = [plan_result, {}]
 
         with patch("swe_af.app.lookup_workflow", return_value=entry):
-            await resume_fn(workflow_id="wf-goal")
+            await resume_fn(build_id="wf-goal")
 
         plan_call = mock_app_call.call_args_list[0]
         # Goal comes from checkpoint (falls back to entry if missing)

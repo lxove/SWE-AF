@@ -93,7 +93,7 @@ class PlannedIssue(BaseModel):
 class PlanCheckpoint(BaseModel):
     """Checkpoint for the planning pipeline to survive crashes."""
 
-    workflow_id: str
+    build_id: str
     goal: str
     repo_path: str
     artifacts_dir: str

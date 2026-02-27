@@ -51,7 +51,7 @@ class TestRegisterWorkflow:
         register_workflow("wf1", "/tmp/repo", ".artifacts", "Build an API")
         entry = lookup_workflow("wf1")
         assert entry is not None
-        assert entry["workflow_id"] == "wf1"
+        assert entry["build_id"] == "wf1"
         assert entry["repo_path"] == "/tmp/repo"
         assert entry["artifacts_dir"] == ".artifacts"
         assert entry["goal"] == "Build an API"
@@ -93,7 +93,7 @@ class TestLookupWorkflow:
         register_workflow("exists", "/tmp", ".art", "test")
         result = lookup_workflow("exists")
         assert result is not None
-        assert result["workflow_id"] == "exists"
+        assert result["build_id"] == "exists"
 
     def test_returns_none_for_unknown_id(self):
         """lookup_workflow returns None for an unknown ID."""
@@ -149,7 +149,7 @@ class TestUpdateWorkflow:
         assert "bad_field" not in entry
 
     def test_noop_for_unknown_id(self):
-        """update_workflow does nothing if workflow_id doesn't exist."""
+        """update_workflow does nothing if build_id doesn't exist."""
         # Ensure registry is initialized with at least one entry
         register_workflow("existing", "/tmp", ".art", "test")
         update_workflow("ghost", status="failed")
@@ -178,7 +178,7 @@ class TestListWorkflows:
         register_workflow("l3", "/tmp/3", ".a3", "goal 3")
         result = list_workflows()
         assert len(result) == 3
-        ids = {e["workflow_id"] for e in result}
+        ids = {e["build_id"] for e in result}
         assert ids == {"l1", "l2", "l3"}
 
     def test_returns_empty_list_when_no_entries(self):
@@ -193,6 +193,6 @@ class TestListWorkflows:
         assert len(result) == 1
         entry = result[0]
         assert isinstance(entry, dict)
-        assert "workflow_id" in entry
+        assert "build_id" in entry
         assert "status" in entry
         assert "created_at" in entry

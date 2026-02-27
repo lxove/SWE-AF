@@ -294,20 +294,20 @@ async def build(
 
     # Unique ID for this build — namespaces git branches/worktrees to prevent
     # collisions when multiple builds run concurrently on the same repository.
-    workflow_id = uuid.uuid4().hex[:8]
+    build_id = uuid.uuid4().hex[:8]
 
-    register_workflow(workflow_id, repo_path, artifacts_dir, goal)
+    register_workflow(build_id, repo_path, artifacts_dir, goal)
 
     try:
         result = await _build_body(
             app, cfg, resolved, goal, repo_path, artifacts_dir,
-            additional_context, workflow_id,
+            additional_context, build_id,
         )
     except BaseException:
-        update_workflow(workflow_id, status="failed")
+        update_workflow(build_id, status="failed")
         raise
 
-    update_workflow(workflow_id, status="completed")
+    update_workflow(build_id, status="completed")
     return result
 
 
@@ -319,10 +319,10 @@ async def _build_body(
     repo_path: str,
     artifacts_dir: str,
     additional_context: str,
-    workflow_id: str,
+    build_id: str,
 ) -> dict:
     """Inner build logic, extracted so build() can wrap it in try/except."""
-    app.note(f"Build starting (workflow_id={workflow_id})", tags=["build", "start"])
+    app.note(f"Build starting (build_id={build_id})", tags=["build", "start"])
 
     # Compute absolute artifacts directory path for logging
     abs_artifacts_dir = os.path.join(os.path.abspath(repo_path), artifacts_dir)
@@ -360,7 +360,7 @@ async def _build_body(
         permission_mode=cfg.permission_mode,
         ai_provider=cfg.ai_provider,
         workspace_manifest=manifest.model_dump() if manifest else None,
-        workflow_id=workflow_id,
+        build_id=build_id,
     )
 
     # Git init with retry logic
@@ -385,7 +385,7 @@ async def _build_body(
             permission_mode=cfg.permission_mode,
             ai_provider=cfg.ai_provider,
             previous_error=previous_error,
-            workflow_id=workflow_id,
+            build_id=build_id,
         )
 
         # Run planning only on first attempt, then just git_init on retries
@@ -449,7 +449,7 @@ async def _build_body(
         )
 
     # 2. EXECUTE
-    update_workflow(workflow_id, status="executing")
+    update_workflow(build_id, status="executing")
     exec_config = cfg.to_execution_config_dict()
 
     dag_result = _unwrap(await app.call(
@@ -459,7 +459,7 @@ async def _build_body(
         execute_fn_target=cfg.execute_fn_target,
         config=exec_config,
         git_config=git_config,
-        workflow_id=workflow_id,
+        build_id=build_id,
         workspace_manifest=manifest.model_dump() if manifest else None,
     ), "execute")
 
@@ -835,7 +835,7 @@ async def plan(
     permission_mode: str = "",
     ai_provider: str = "claude",
     workspace_manifest: dict | None = None,
-    workflow_id: str = "",
+    build_id: str = "",
 ) -> dict:
     """Run the full planning pipeline.
 
@@ -858,7 +858,7 @@ async def plan(
         )
     else:
         checkpoint = PlanCheckpoint(
-            workflow_id=workflow_id,
+            build_id=build_id,
             goal=goal,
             repo_path=repo_path,
             artifacts_dir=artifacts_dir_abs,
@@ -1167,7 +1167,7 @@ async def execute(
     config: dict | None = None,
     git_config: dict | None = None,
     resume: bool = False,
-    workflow_id: str = "",
+    build_id: str = "",
     workspace_manifest: dict | None = None,
 ) -> dict:
     """Execute a planned DAG with self-healing replanning.
@@ -1213,7 +1213,7 @@ async def execute(
         node_id=NODE_ID,
         git_config=git_config,
         resume=resume,
-        workflow_id=workflow_id,
+        build_id=build_id,
         workspace_manifest=workspace_manifest,
     )
     return state.model_dump()
@@ -1277,7 +1277,7 @@ async def resume_build(
 
 @app.reasoner()
 async def resume(
-    workflow_id: str,
+    build_id: str,
 ) -> dict:
     """Resume a workflow by ID, auto-detecting whether to resume planning or execution.
 
@@ -1289,10 +1289,10 @@ async def resume(
     """
     import json
 
-    entry = lookup_workflow(workflow_id)
+    entry = lookup_workflow(build_id)
     if entry is None:
         raise RuntimeError(
-            f"Workflow '{workflow_id}' not found in registry. "
+            f"Workflow '{build_id}' not found in registry. "
             "Use list_workflows() to see available workflows."
         )
 
@@ -1308,14 +1308,14 @@ async def resume(
 
     if not has_exec and not has_plan:
         raise RuntimeError(
-            f"No checkpoints found for workflow '{workflow_id}' at {base}. "
+            f"No checkpoints found for workflow '{build_id}' at {base}. "
             "Neither execution nor plan checkpoint exists."
         )
 
     if has_exec:
         # Resume from execution checkpoint (takes precedence)
         app.note(
-            f"Resuming workflow {workflow_id} from execution checkpoint",
+            f"Resuming workflow {build_id} from execution checkpoint",
             tags=["resume", "execution"],
         )
         with open(exec_checkpoint_path, "r") as f:
@@ -1339,13 +1339,13 @@ async def resume(
             config=None,
             git_config=None,
             resume=True,
-            workflow_id=workflow_id,
+            build_id=build_id,
         )
         return result
 
     # Resume from plan checkpoint only
     app.note(
-        f"Resuming workflow {workflow_id} from plan checkpoint",
+        f"Resuming workflow {build_id} from plan checkpoint",
         tags=["resume", "planning"],
     )
     with open(plan_checkpoint_path, "r") as f:
@@ -1357,23 +1357,23 @@ async def resume(
         goal=plan_ckpt.get("goal", entry["goal"]),
         repo_path=repo_path,
         artifacts_dir=artifacts_dir,
-        workflow_id=workflow_id,
+        build_id=build_id,
         workspace_manifest=plan_ckpt.get("workspace_manifest"),
     )
     plan_result = _unwrap(raw_plan, "plan")
 
     # Continue to execution
     app.note(
-        f"Plan resumed for workflow {workflow_id}, proceeding to execution",
+        f"Plan resumed for workflow {build_id}, proceeding to execution",
         tags=["resume", "execution"],
     )
-    update_workflow(workflow_id, status="executing")
+    update_workflow(build_id, status="executing")
 
     result = await app.call(
         f"{NODE_ID}.execute",
         plan_result=plan_result,
         repo_path=repo_path,
-        workflow_id=workflow_id,
+        build_id=build_id,
     )
     return result
 

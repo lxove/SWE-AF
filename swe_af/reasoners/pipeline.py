@@ -64,7 +64,7 @@ def _save_plan_checkpoint(checkpoint: PlanCheckpoint) -> None:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise
-    update_workflow(checkpoint.workflow_id, status="planning")
+    update_workflow(checkpoint.build_id, status="planning")
 
 
 def _load_plan_checkpoint(artifacts_dir: str) -> PlanCheckpoint | None:

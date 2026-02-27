@@ -58,7 +58,7 @@ async def _setup_worktrees(
     node_id: str,
     config: ExecutionConfig,
     note_fn: Callable | None = None,
-    workflow_id: str = "",
+    build_id: str = "",
 ) -> list[dict]:
     """Create git worktrees for parallel issue isolation.
 
@@ -89,7 +89,7 @@ async def _setup_worktrees(
             level=dag_state.current_level,
             model=config.git_model,
             ai_provider=config.ai_provider,
-            workflow_id=workflow_id,
+            build_id=build_id,
         )
 
         if not setup.get("success"):
@@ -152,7 +152,7 @@ async def _setup_worktrees(
             level=dag_state.current_level,
             model=config.git_model,
             ai_provider=config.ai_provider,
-            workflow_id=workflow_id,
+            build_id=build_id,
         )
 
         if not setup.get("success"):
@@ -598,7 +598,7 @@ async def _init_all_repos(
     git_model: str,
     ai_provider: str,
     permission_mode: str = "",
-    workflow_id: str = "",
+    build_id: str = "",
     note_fn: Callable | None = None,
 ) -> None:
     """Run git_init concurrently for all repos in workspace_manifest.
@@ -617,7 +617,7 @@ async def _init_all_repos(
         git_model: Resolved model string. Source: config.git_model.
         ai_provider: 'claude' or 'opencode'. Source: config.ai_provider.
         permission_mode: Forwarded to run_git_init.
-        workflow_id: Forwarded to run_git_init for branch namespace isolation.
+        build_id: Forwarded to run_git_init for branch namespace isolation.
         note_fn: Optional callback for observability.
     """
     if dag_state.workspace_manifest is None:
@@ -641,7 +641,7 @@ async def _init_all_repos(
             model=git_model,
             permission_mode=permission_mode,
             ai_provider=ai_provider,
-            workflow_id=workflow_id,
+            build_id=build_id,
         )
         return ws_repo.repo_name, result
 
@@ -693,7 +693,7 @@ def _save_checkpoint(dag_state: DAGState, note_fn: Callable | None = None) -> No
         json.dump(dag_state.model_dump(), f, indent=2, default=str)
     if note_fn:
         note_fn(f"Checkpoint saved: level={dag_state.current_level}", tags=["execution", "checkpoint"])
-    update_workflow(dag_state.workflow_id, status="executing")
+    update_workflow(dag_state.build_id, status="executing")
 
 
 def _load_checkpoint(artifacts_dir: str) -> DAGState | None:
@@ -706,7 +706,7 @@ def _load_checkpoint(artifacts_dir: str) -> DAGState | None:
 
 
 def _init_dag_state(
-    plan_result: dict, repo_path: str, git_config: dict | None = None, workflow_id: str = "",
+    plan_result: dict, repo_path: str, git_config: dict | None = None, build_id: str = "",
 ) -> DAGState:
     """Extract DAGState from a PlanResult dict.
 
@@ -765,7 +765,7 @@ def _init_dag_state(
         architecture_summary=architecture_summary,
         all_issues=all_issues,
         levels=levels,
-        workflow_id=workflow_id,
+        build_id=build_id,
         **git_kwargs,
     )
 
@@ -1352,7 +1352,7 @@ async def run_dag(
     node_id: str = "swe-planner",
     git_config: dict | None = None,
     resume: bool = False,
-    workflow_id: str = "",
+    build_id: str = "",
     workspace_manifest: dict | None = None,
 ) -> DAGState:
     """Execute a planned DAG with self-healing replanning.
@@ -1398,7 +1398,7 @@ async def run_dag(
             result = await _raw_call_fn(target, **kwargs)
             return unwrap_call_result(result, target)
 
-    dag_state = _init_dag_state(plan_result, repo_path, git_config=git_config, workflow_id=workflow_id)
+    dag_state = _init_dag_state(plan_result, repo_path, git_config=git_config, build_id=build_id)
     dag_state.workspace_manifest = workspace_manifest
     dag_state.max_replans = config.max_replans
 
@@ -1436,7 +1436,7 @@ async def run_dag(
             node_id=node_id,
             git_model=config.git_model,
             ai_provider=config.ai_provider,
-            workflow_id=workflow_id,
+            build_id=build_id,
             note_fn=note_fn,
         )
 
@@ -1483,7 +1483,7 @@ async def run_dag(
         if call_fn and dag_state.git_integration_branch:
             active_issues = await _setup_worktrees(
                 dag_state, active_issues, call_fn, node_id, config, note_fn,
-                workflow_id=dag_state.workflow_id,
+                build_id=dag_state.build_id,
             )
             # Persist worktree_path/branch_name back to dag_state.all_issues
             # so checkpoints contain the enriched data (resume-safe).
@@ -1567,9 +1567,9 @@ async def run_dag(
                 )
 
             # Start cleanup in background (doesn't affect replan decisions)
-            # Use branch_name if injected by _setup_worktrees (includes workflow_id prefix),
-            # otherwise derive from workflow_id + sequence + name.
-            _bid = dag_state.workflow_id
+            # Use branch_name if injected by _setup_worktrees (includes build_id prefix),
+            # otherwise derive from build_id + sequence + name.
+            _bid = dag_state.build_id
             branches_to_clean = [
                 i["branch_name"] if i.get("branch_name") else (
                     f"issue/{_bid}-{str(i.get('sequence_number') or 0).zfill(2)}-{i['name']}"
@@ -1755,8 +1755,8 @@ async def run_dag(
     # Final worktree sweep — catch anything the per-level cleanup missed
     if call_fn and dag_state.worktrees_dir and dag_state.git_integration_branch:
         # Collect all issue branches that should have been cleaned.
-        # Must use the same workflow_id-prefixed format that workspace setup created.
-        _bid = dag_state.workflow_id
+        # Must use the same build_id-prefixed format that workspace setup created.
+        _bid = dag_state.build_id
         all_branches = [
             f"issue/{_bid}-{str(i.get('sequence_number') or 0).zfill(2)}-{i['name']}"
             if _bid else

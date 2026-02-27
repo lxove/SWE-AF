@@ -31,7 +31,7 @@ def checkpoint_dir(tmp_path):
 def _make_full_checkpoint(artifacts_dir: str) -> PlanCheckpoint:
     """Create a PlanCheckpoint with all fields populated."""
     return PlanCheckpoint(
-        workflow_id="abc123",
+        build_id="abc123",
         goal="Build a REST API",
         repo_path="/tmp/test-repo",
         artifacts_dir=artifacts_dir,
@@ -68,12 +68,12 @@ class TestPlanCheckpointModel:
     def test_minimal_fields(self):
         """PlanCheckpoint can be constructed with only required fields."""
         cp = PlanCheckpoint(
-            workflow_id="wf1",
+            build_id="wf1",
             goal="test goal",
             repo_path="/tmp/repo",
             artifacts_dir="/tmp/artifacts",
         )
-        assert cp.workflow_id == "wf1"
+        assert cp.build_id == "wf1"
         assert cp.goal == "test goal"
         assert cp.repo_path == "/tmp/repo"
         assert cp.artifacts_dir == "/tmp/artifacts"
@@ -95,7 +95,7 @@ class TestPlanCheckpointModel:
     def test_all_fields_populated(self, checkpoint_dir):
         """PlanCheckpoint with all fields populated retains values."""
         cp = _make_full_checkpoint(checkpoint_dir)
-        assert cp.workflow_id == "abc123"
+        assert cp.build_id == "abc123"
         assert cp.phase == "sprint_planner"
         assert len(cp.architecture_revisions) == 2
         assert len(cp.review_iterations) == 2
@@ -106,7 +106,7 @@ class TestPlanCheckpointModel:
     def test_architecture_revisions_accumulate(self):
         """architecture_revisions list grows as revisions are appended."""
         cp = PlanCheckpoint(
-            workflow_id="wf1",
+            build_id="wf1",
             goal="test",
             repo_path="/tmp",
             artifacts_dir="/tmp/art",
@@ -121,7 +121,7 @@ class TestPlanCheckpointModel:
     def test_review_iterations_accumulate(self):
         """review_iterations list grows as reviews are appended."""
         cp = PlanCheckpoint(
-            workflow_id="wf1",
+            build_id="wf1",
             goal="test",
             repo_path="/tmp",
             artifacts_dir="/tmp/art",
@@ -169,7 +169,7 @@ class TestPlanCheckpointSaveLoad:
 
         artifacts_dir = str(tmp_path / "deep" / "nested" / "artifacts")
         cp = PlanCheckpoint(
-            workflow_id="wf1",
+            build_id="wf1",
             goal="test",
             repo_path="/tmp",
             artifacts_dir=artifacts_dir,
@@ -195,7 +195,7 @@ class TestPlanCheckpointSaveLoad:
         path = os.path.join(checkpoint_dir, "plan", "checkpoint.json")
         with open(path) as f:
             data = json.load(f)
-        assert data["workflow_id"] == "abc123"
+        assert data["build_id"] == "abc123"
         assert data["phase"] == "sprint_planner"
 
     def test_round_trip_minimal(self, checkpoint_dir):
@@ -208,7 +208,7 @@ class TestPlanCheckpointSaveLoad:
         )
 
         original = PlanCheckpoint(
-            workflow_id="minimal",
+            build_id="minimal",
             goal="simple test",
             repo_path="/tmp/repo",
             artifacts_dir=checkpoint_dir,
@@ -231,14 +231,14 @@ class TestPlanCheckpointSaveLoad:
         )
 
         cp1 = PlanCheckpoint(
-            workflow_id="wf1",
+            build_id="wf1",
             goal="first",
             repo_path="/tmp",
             artifacts_dir=checkpoint_dir,
             phase="pm",
         )
         cp2 = PlanCheckpoint(
-            workflow_id="wf1",
+            build_id="wf1",
             goal="first",
             repo_path="/tmp",
             artifacts_dir=checkpoint_dir,
