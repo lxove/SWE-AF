@@ -14,8 +14,8 @@ import subprocess
 import uuid
 
 from swe_af.reasoners import router
-from swe_af.reasoners.pipeline import _assign_sequence_numbers, _compute_levels, _validate_file_conflicts
-from swe_af.reasoners.schemas import PlanResult, ReviewResult
+from swe_af.reasoners.pipeline import _assign_sequence_numbers, _compute_levels, _save_plan_checkpoint, _validate_file_conflicts
+from swe_af.reasoners.schemas import PlanCheckpoint, PlanResult, ReviewResult
 
 from agentfield import Agent
 from swe_af.execution.envelope import unwrap_call_result as _unwrap
@@ -332,6 +332,7 @@ async def build(
         permission_mode=cfg.permission_mode,
         ai_provider=cfg.ai_provider,
         workspace_manifest=manifest.model_dump() if manifest else None,
+        workflow_id=workflow_id,
     )
 
     # Git init with retry logic
@@ -805,12 +806,23 @@ async def plan(
     permission_mode: str = "",
     ai_provider: str = "claude",
     workspace_manifest: dict | None = None,
+    workflow_id: str = "",
 ) -> dict:
     """Run the full planning pipeline.
 
     Orchestrates: product_manager → architect ↔ tech_lead → sprint_planner → issue_writers
     """
     app.note("Pipeline starting", tags=["pipeline", "start"])
+
+    # Initialize plan checkpoint
+    artifacts_dir_abs = os.path.join(os.path.abspath(repo_path), artifacts_dir)
+    checkpoint = PlanCheckpoint(
+        workflow_id=workflow_id,
+        goal=goal,
+        repo_path=repo_path,
+        artifacts_dir=artifacts_dir_abs,
+        workspace_manifest=workspace_manifest,
+    )
 
     # 1. PM scopes the goal into a PRD
     app.note("Phase 1: Product Manager", tags=["pipeline", "pm"])
@@ -825,6 +837,9 @@ async def plan(
         ai_provider=ai_provider,
         workspace_manifest=workspace_manifest,
     ), "run_product_manager")
+    checkpoint.prd = prd
+    checkpoint.phase = "pm"
+    _save_plan_checkpoint(checkpoint)
 
     # 2. Architect designs the solution
     app.note("Phase 2: Architect", tags=["pipeline", "architect"])
@@ -838,6 +853,10 @@ async def plan(
         ai_provider=ai_provider,
         workspace_manifest=workspace_manifest,
     ), "run_architect")
+    checkpoint.architecture_revisions.append(arch)
+    checkpoint.architecture = arch
+    checkpoint.review_loop_sub_phase = "architect_done"
+    _save_plan_checkpoint(checkpoint)
 
     # 3. Tech Lead review loop
     review = None
@@ -854,6 +873,11 @@ async def plan(
             ai_provider=ai_provider,
             workspace_manifest=workspace_manifest,
         ), "run_tech_lead")
+        checkpoint.review_iterations.append(review)
+        checkpoint.review = review
+        checkpoint.review_loop_sub_phase = "tech_lead_done"
+        checkpoint.review_loop_iteration = i + 1
+        _save_plan_checkpoint(checkpoint)
         if review["approved"]:
             break
         if i < max_review_iterations:
@@ -869,6 +893,10 @@ async def plan(
                 ai_provider=ai_provider,
                 workspace_manifest=workspace_manifest,
             ), "run_architect (revision)")
+            checkpoint.architecture_revisions.append(arch)
+            checkpoint.architecture = arch
+            checkpoint.review_loop_sub_phase = "architect_done"
+            _save_plan_checkpoint(checkpoint)
 
     # Force-approve if we exhausted iterations
     assert review is not None
@@ -880,6 +908,9 @@ async def plan(
             complexity_assessment=review.get("complexity_assessment", "appropriate"),
             summary=review["summary"] + " [auto-approved after max iterations]",
         ).model_dump()
+    checkpoint.phase = "tech_lead"
+    checkpoint.review = review
+    _save_plan_checkpoint(checkpoint)
 
     # 4. Sprint planner decomposes into issues
     app.note("Phase 4: Sprint Planner", tags=["pipeline", "sprint_planner"])
@@ -902,6 +933,11 @@ async def plan(
     issues = _assign_sequence_numbers(issues, levels)
     file_conflicts = _validate_file_conflicts(issues, levels)
 
+    checkpoint.sprint_plan = sprint_result
+    checkpoint.levels = levels
+    checkpoint.phase = "sprint_planner"
+    _save_plan_checkpoint(checkpoint)
+
     # 4b. Parallel issue writing (issues now have sequence_number set)
     base = os.path.join(os.path.abspath(repo_path), artifacts_dir)
     issues_dir = os.path.join(base, "plan", "issues")
@@ -918,13 +954,16 @@ async def plan(
         f"Phase 4b: Writing {len(issues)} issue files in parallel",
         tags=["pipeline", "issue_writers"],
     )
-    writer_tasks = []
-    for issue in issues:
+
+    # Issue writer progress tracking with lock
+    checkpoint_lock = asyncio.Lock()
+
+    async def _write_issue_with_checkpoint(issue: dict) -> dict:
         siblings = [
             {"name": i["name"], "title": i.get("title", ""), "provides": i.get("provides", [])}
             for i in issues if i["name"] != issue["name"]
         ]
-        writer_tasks.append(app.call(
+        result = await app.call(
             f"{NODE_ID}.run_issue_writer",
             issue=issue,
             prd_summary=prd_summary_str,
@@ -938,7 +977,14 @@ async def plan(
             permission_mode=permission_mode,
             ai_provider=ai_provider,
             workspace_manifest=workspace_manifest,
-        ))
+        )
+        if isinstance(result, dict) and result.get("success"):
+            async with checkpoint_lock:
+                checkpoint.issue_writer_progress.append(issue["name"])
+                _save_plan_checkpoint(checkpoint)
+        return result
+
+    writer_tasks = [_write_issue_with_checkpoint(issue) for issue in issues]
     writer_results = await asyncio.gather(*writer_tasks, return_exceptions=True)
 
     succeeded = sum(1 for r in writer_results if isinstance(r, dict) and r.get("success"))
@@ -947,6 +993,9 @@ async def plan(
         f"Issue writers complete: {succeeded} succeeded, {failed} failed",
         tags=["pipeline", "issue_writers", "complete"],
     )
+
+    checkpoint.phase = "issue_writers"
+    _save_plan_checkpoint(checkpoint)
 
     # 6. Write rationale to disk
     rationale_path = os.path.join(base, "rationale.md")
