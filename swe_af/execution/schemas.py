@@ -282,7 +282,7 @@ class DAGState(BaseModel):
     merged_branches: list[str] = []
     unmerged_branches: list[str] = []  # branches that failed to merge
     worktrees_dir: str = ""  # e.g. repo_path/.worktrees
-    build_id: str = ""  # unique per build() call; namespaces git branches/worktrees
+    workflow_id: str = ""  # unique per build() call; namespaces git branches/worktrees
 
     # --- Merge/test history ---
     merge_results: list[dict] = []
@@ -294,6 +294,14 @@ class DAGState(BaseModel):
 
     # --- Multi-repo workspace ---
     workspace_manifest: dict | None = None  # Serialised WorkspaceManifest (dict for JSON compat)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_build_id(cls, data: Any) -> Any:
+        """Map legacy ``build_id`` to ``workflow_id`` for backward compat."""
+        if isinstance(data, dict) and "build_id" in data:
+            data.setdefault("workflow_id", data.pop("build_id"))
+        return data
 
 
 class GitInitResult(BaseModel):
