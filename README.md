@@ -14,21 +14,22 @@
 ![WorldSpace Community Developer](https://img.shields.io/badge/WorldSpace-Community%20Developer-111827?style=for-the-badge)
 [![Example PR](https://img.shields.io/badge/Example-PR%20%23179-ff6b35?style=for-the-badge&logo=github)](https://github.com/Agent-Field/agentfield/pull/179)
 
-
+**One API call → full engineering team → shipped code.**
 
 <p>
   <a href="#quick-start">Quick Start</a> •
   <a href="#why-swe-af">Why SWE-AF</a> •
   <a href="#in-action">In Action</a> •
   <a href="#adaptive-factory-control">Factory Control</a> •
-  <a href="#benchmark-snapshot">Benchmark</a> •
+  <a href="#benchmark">Benchmark</a> •
+  <a href="#operating-modes">Modes</a> •
   <a href="#api-reference">API</a> •
-  <a href="docs/ARCHITECTURE.md">Architecture Doc</a>
+  <a href="docs/ARCHITECTURE.md">Architecture</a>
 </p>
 
 </div>
 
-One API call spins up a full autonomous engineering team that can scope, build, adapt, and ship complex software end to end.
+One API call spins up a full autonomous engineering team — product managers, architects, coders, reviewers, testers — that scopes, builds, adapts, and ships complex software end to end.
 SWE-AF is a first step toward **autonomous software engineering factories**, scaling from simple goals to hard multi-issue programs with hundreds to thousands of agent invocations.
 
 <p align="center">
@@ -61,19 +62,13 @@ JSON
 
 Swap `models.default` and any role key (`coder`, `qa`, `architect`, etc.) to any model your runtime supports.
 
-## Multi-Repository Workspace Support
+## Operating Modes
 
-SWE-AF supports coordinated work across multiple repositories in a single build. This is useful when your project consists of a primary application plus shared libraries, monorepo sub-projects, or dependent microservices.
+SWE-AF works in two modes: point it at a single repository, or orchestrate coordinated changes across multiple repos in one build.
 
-### Use Cases
+### Single-Repository Mode
 
-- **Primary App + Shared Libraries**: Build a web application that depends on a shared utilities or SDK library.
-- **Monorepo Sub-Projects**: Coordinate changes across multiple packages in a monorepo (each repo_url points to a sub-directory or separate repo).
-- **Dependent Microservices**: When a feature spans multiple services (e.g., API + Worker Queue), define roles to orchestrate changes across boundaries.
-
-### Single-Repo (Backward Compatible)
-
-Single-repository builds work exactly as before — just use `repo_url` or `repo_path` at the top level:
+The default. Pass `repo_url` (remote) or `repo_path` (local) and SWE-AF handles everything:
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/execute/async/swe-planner.build \
@@ -86,9 +81,9 @@ curl -X POST http://localhost:8080/api/v1/execute/async/swe-planner.build \
   }'
 ```
 
-### Multi-Repo Configuration
+### Multi-Repository Mode
 
-Pass `config.repos` as an array of repository objects, each with `repo_url` (or `repo_path`) and a `role`:
+When your work spans multiple codebases — a primary app plus shared libraries, monorepo sub-projects, or dependent microservices — pass `config.repos` as an array with roles:
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/execute/async/swe-planner.build \
@@ -117,8 +112,13 @@ curl -X POST http://localhost:8080/api/v1/execute/async/swe-planner.build \
 ```
 
 **Roles:**
-- `primary`: The main application being built. Changes here drive the build; failures block progress.
-- `dependency`: Libraries or services that may be modified to support the primary repo. Failures are captured but don't block.
+- `primary` — The main application. Changes here drive the build; failures block progress.
+- `dependency` — Libraries or services modified to support the primary repo. Failures are captured but don't block.
+
+**Use cases:**
+- Primary app + shared SDK or utilities library
+- Monorepo sub-projects that live in separate repos
+- Feature spanning multiple microservices (e.g., API + worker queue)
 
 ## Autonomous Build Spotlight
 
@@ -143,15 +143,16 @@ Details: [`examples/llm-rust-python-compiler-sonnet/README.md`](examples/llm-rus
 
 ## Why SWE-AF
 
-Most agent frameworks are harnesses around a single coder loop. SWE-AF is a software engineering factory built from coordinated harnesses.
+Most agent frameworks wrap a single coder loop. SWE-AF is a coordinated engineering factory — planning, execution, and governance agents run as a control stack that adapts in real time.
 
-- Hardness-aware execution: easy issues pass through quickly, while hard issues trigger deeper adaptation and DAG-level replanning instead of blind retries.
-- Factory architecture: planning, execution, and governance agents run as a coordinated control stack.
-- Continual learning (optional): with `enable_learning=true`, conventions and failure patterns discovered early are injected into downstream issues.
-- Agent-scale parallelism: dependency-level scheduling + isolated git worktrees allow large fan-out without branch collisions.
-- Fleet-scale orchestration with AgentField: many SWE-AF nodes can run continuously in parallel, driving thousands of agent invocations across concurrent builds.
-- Explicit compromise tracking: when scope is relaxed, debt is typed, severity-rated, and propagated.
-- Long-run reliability: checkpointed execution supports `resume_build` after crashes or interruptions.
+- **Hardness-aware execution** — easy issues pass through quickly, while hard issues trigger deeper adaptation and DAG-level replanning instead of blind retries.
+- **Factory architecture** — not a single-agent wrapper. Planning, execution, and governance agents run as a coordinated control stack.
+- **Multi-model, multi-provider** — assign different models per role (`coder: opus`, `qa: haiku`). Works with Claude, OpenRouter, OpenAI, and Google.
+- **Continual learning** — with `enable_learning=true`, conventions and failure patterns discovered early are injected into downstream issues.
+- **Agent-scale parallelism** — dependency-level scheduling + isolated git worktrees allow large fan-out without branch collisions.
+- **Fleet-scale orchestration** — many SWE-AF nodes can run continuously in parallel via AgentField, driving thousands of agent invocations across concurrent builds.
+- **Explicit compromise tracking** — when scope is relaxed, debt is typed, severity-rated, and propagated.
+- **Long-run reliability** — checkpointed execution supports `resume_build` after crashes or interruptions.
 
 ## In Action
 
@@ -316,7 +317,7 @@ For OpenRouter with `open_code`, use model IDs in `openrouter/<provider>/<model>
 
 > Typical runs spin up 400-500+ agent instances across planning, execution, QA, and verification. For larger DAGs and repeated adaptation/replanning cycles, SWE-AF can scale into the high hundreds to thousands of agent invocations in a single build.
 
-## Benchmark Snapshot
+## Benchmark
 
 **95/100 with haiku and MiniMax**: SWE-AF scored 95/100 with both Claude haiku-class routing ($20) and MiniMax M2.5 via open runtime ($6), outperforming Claude Code sonnet (73), Codex o3 (62), and Claude Code haiku (59) on the same prompt.
 
