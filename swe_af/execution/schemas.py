@@ -295,6 +295,14 @@ class DAGState(BaseModel):
     # --- Multi-repo workspace ---
     workspace_manifest: dict | None = None  # Serialised WorkspaceManifest (dict for JSON compat)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_build_id(cls, data: Any) -> Any:
+        """Map legacy ``build_id`` to ``build_id`` for backward compat."""
+        if isinstance(data, dict) and "build_id" in data:
+            data.setdefault("build_id", data.pop("build_id"))
+        return data
+
 
 class GitInitResult(BaseModel):
     """Result of git initialization."""

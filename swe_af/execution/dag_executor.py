@@ -11,6 +11,7 @@ from typing import Callable
 
 from swe_af.execution.dag_utils import apply_replan, find_downstream
 from swe_af.execution.envelope import unwrap_call_result
+from swe_af.workflow_registry import update_workflow
 from swe_af.execution.schemas import (
     AdvisorAction,
     DAGState,
@@ -692,6 +693,7 @@ def _save_checkpoint(dag_state: DAGState, note_fn: Callable | None = None) -> No
         json.dump(dag_state.model_dump(), f, indent=2, default=str)
     if note_fn:
         note_fn(f"Checkpoint saved: level={dag_state.current_level}", tags=["execution", "checkpoint"])
+    update_workflow(dag_state.build_id, status="executing")
 
 
 def _load_checkpoint(artifacts_dir: str) -> DAGState | None:

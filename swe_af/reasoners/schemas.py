@@ -90,6 +90,28 @@ class PlannedIssue(BaseModel):
     target_repo: str = ""  # Target repository for multi-repo builds (empty = default/only repo)
 
 
+class PlanCheckpoint(BaseModel):
+    """Checkpoint for the planning pipeline to survive crashes."""
+
+    build_id: str
+    goal: str
+    repo_path: str
+    artifacts_dir: str
+    config: dict | None = None
+    workspace_manifest: dict | None = None
+    phase: str = ""  # Last completed phase: "pm", "architect", "tech_lead", "sprint_planner", "issue_writers"
+    prd: dict | None = None
+    architecture: dict | None = None
+    review: dict | None = None
+    architecture_revisions: list[dict] = []  # All architecture versions in order
+    review_iterations: list[dict] = []  # All tech lead reviews in order
+    review_loop_iteration: int = 0  # Current loop index (0-based)
+    review_loop_sub_phase: str = ""  # "architect_done" or "tech_lead_done"
+    sprint_plan: dict | None = None
+    levels: list[list[str]] | None = None
+    issue_writer_progress: list[str] = []
+
+
 class PlanResult(BaseModel):
     """Final output of the planning pipeline."""
 

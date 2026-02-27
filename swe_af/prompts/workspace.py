@@ -137,7 +137,7 @@ def workspace_setup_task_prompt(
         branch_note = (
             f"   Branch names MUST be prefixed with the Build ID: `issue/{build_id}-<NN>-<name>`\n"
             f"   Worktree dirs MUST be prefixed with the Build ID: `issue-{build_id}-<NN>-<name>`\n"
-            "   This prevents collisions with other concurrent builds on the same repository."
+            "   This prevents collisions with other concurrent workflows on the same repository."
         )
     else:
         worktree_cmd = (

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections import defaultdict, deque
 from pathlib import Path
 
@@ -19,10 +20,12 @@ from swe_af.agent_ai.types import Tool
 from swe_af.execution.schemas import DEFAULT_AGENT_MAX_TURNS
 from swe_af.reasoners.schemas import (
     Architecture,
+    PlanCheckpoint,
     PlannedIssue,
     PRD,
     ReviewResult,
 )
+from swe_af.workflow_registry import update_workflow
 
 from . import router
 
@@ -46,6 +49,31 @@ def _ensure_paths(base: str) -> dict[str, str]:
     for d in ("logs", "plan", "issues"):
         Path(paths[d]).mkdir(parents=True, exist_ok=True)
     return paths
+
+
+def _save_plan_checkpoint(checkpoint: PlanCheckpoint) -> None:
+    """Persist PlanCheckpoint to disk using atomic write for crash safety."""
+    path = os.path.join(checkpoint.artifacts_dir, "plan", "checkpoint.json")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(checkpoint.model_dump(), f, indent=2, default=str)
+        os.rename(tmp_path, path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+    update_workflow(checkpoint.build_id, status="planning")
+
+
+def _load_plan_checkpoint(artifacts_dir: str) -> PlanCheckpoint | None:
+    """Load PlanCheckpoint from disk, or return None if not found."""
+    path = os.path.join(artifacts_dir, "plan", "checkpoint.json")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return PlanCheckpoint(**json.load(f))
 
 
 def _compute_levels(issues: list[dict]) -> list[list[str]]:
