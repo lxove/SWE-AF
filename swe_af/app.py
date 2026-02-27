@@ -4,6 +4,7 @@ Exposes:
   - ``build``: end-to-end plan → execute → verify (single entry point)
   - ``plan``: orchestrates product_manager → architect ↔ tech_lead → sprint_planner
   - ``execute``: runs a planned DAG with self-healing replanning
+  - ``resume``: resume a workflow by ID, auto-detecting plan vs execution phase
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import uuid
 from swe_af.reasoners import router
 from swe_af.reasoners.pipeline import _assign_sequence_numbers, _compute_levels, _load_plan_checkpoint, _save_plan_checkpoint, _validate_file_conflicts
 from swe_af.reasoners.schemas import PlanCheckpoint, PlanResult, ReviewResult
-from swe_af.workflow_registry import register_workflow, update_workflow
+from swe_af.workflow_registry import lookup_workflow, register_workflow, update_workflow
 
 from agentfield import Agent
 from swe_af.execution.envelope import unwrap_call_result as _unwrap
@@ -1271,6 +1272,109 @@ async def resume_build(
         resume=True,
     )
 
+    return result
+
+
+@app.reasoner()
+async def resume(
+    workflow_id: str,
+) -> dict:
+    """Resume a workflow by ID, auto-detecting whether to resume planning or execution.
+
+    Looks up the workflow in the registry, checks for existing checkpoints,
+    and resumes from the appropriate phase:
+    - If an execution checkpoint exists, resumes execution.
+    - If only a plan checkpoint exists, resumes planning then continues to execution.
+    - Raises RuntimeError if the workflow is not found or no checkpoints exist.
+    """
+    import json
+
+    entry = lookup_workflow(workflow_id)
+    if entry is None:
+        raise RuntimeError(
+            f"Workflow '{workflow_id}' not found in registry. "
+            "Use list_workflows() to see available workflows."
+        )
+
+    repo_path = entry["repo_path"]
+    artifacts_dir = entry["artifacts_dir"]
+    base = os.path.join(os.path.abspath(repo_path), artifacts_dir)
+
+    exec_checkpoint_path = os.path.join(base, "execution", "checkpoint.json")
+    plan_checkpoint_path = os.path.join(base, "plan", "checkpoint.json")
+
+    has_exec = os.path.exists(exec_checkpoint_path)
+    has_plan = os.path.exists(plan_checkpoint_path)
+
+    if not has_exec and not has_plan:
+        raise RuntimeError(
+            f"No checkpoints found for workflow '{workflow_id}' at {base}. "
+            "Neither execution nor plan checkpoint exists."
+        )
+
+    if has_exec:
+        # Resume from execution checkpoint (takes precedence)
+        app.note(
+            f"Resuming workflow {workflow_id} from execution checkpoint",
+            tags=["resume", "execution"],
+        )
+        with open(exec_checkpoint_path, "r") as f:
+            checkpoint = json.load(f)
+
+        plan_result = {
+            "prd": {},
+            "architecture": {},
+            "review": {},
+            "issues": checkpoint.get("all_issues", []),
+            "levels": checkpoint.get("levels", []),
+            "file_conflicts": [],
+            "artifacts_dir": checkpoint.get("artifacts_dir", base),
+            "rationale": checkpoint.get("original_plan_summary", ""),
+        }
+
+        result = await app.call(
+            f"{NODE_ID}.execute",
+            plan_result=plan_result,
+            repo_path=repo_path,
+            config=None,
+            git_config=None,
+            resume=True,
+            workflow_id=workflow_id,
+        )
+        return result
+
+    # Resume from plan checkpoint only
+    app.note(
+        f"Resuming workflow {workflow_id} from plan checkpoint",
+        tags=["resume", "planning"],
+    )
+    with open(plan_checkpoint_path, "r") as f:
+        plan_ckpt = json.load(f)
+
+    # Resume planning — plan() will detect the checkpoint and skip completed phases
+    raw_plan = await app.call(
+        f"{NODE_ID}.plan",
+        goal=plan_ckpt.get("goal", entry["goal"]),
+        repo_path=repo_path,
+        artifacts_dir=artifacts_dir,
+        workflow_id=workflow_id,
+        workspace_manifest=plan_ckpt.get("workspace_manifest"),
+    )
+    plan_result = _unwrap(raw_plan, "plan")
+
+    # Continue to execution
+    app.note(
+        f"Plan resumed for workflow {workflow_id}, proceeding to execution",
+        tags=["resume", "execution"],
+    )
+    update_workflow(workflow_id, status="executing")
+
+    result = await app.call(
+        f"{NODE_ID}.execute",
+        plan_result=plan_result,
+        repo_path=repo_path,
+        workflow_id=workflow_id,
+    )
     return result
 
 
