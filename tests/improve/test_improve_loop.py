@@ -732,3 +732,362 @@ async def test_improve_run_record_saved(temp_repo, sample_improvement):
     assert len(loaded_state.runs) == 1
     assert loaded_state.runs[0].improvements_completed == 1
     assert loaded_state.runs[0].stopped_reason == "max_improvements_reached"
+
+
+@pytest.mark.asyncio
+async def test_improve_stale_then_next_pending_executed(temp_repo):
+    """Test stale improvement is skipped and next pending is picked and executed."""
+    from swe_af.improve import app as improve_app_module
+
+    # Create two improvements - first will be stale, second should execute
+    imp1 = ImprovementArea(
+        id="stale-imp",
+        category="test-coverage",
+        title="Stale test",
+        description="This will be marked stale",
+        files=["deleted.py"],
+        priority=1,
+        status="pending",
+        found_by_run=datetime.now(timezone.utc).isoformat(),
+    )
+
+    imp2 = ImprovementArea(
+        id="valid-imp",
+        category="test-coverage",
+        title="Valid test",
+        description="This should execute",
+        files=["valid.py"],
+        priority=2,
+        status="pending",
+        found_by_run=datetime.now(timezone.utc).isoformat(),
+    )
+
+    state = ImprovementState(repo_path=temp_repo, improvements=[imp1, imp2])
+    _save_state(temp_repo, state)
+
+    mock_validate_stale = {
+        "is_valid": False,
+        "reason": "File deleted",
+        "file_changes_detected": ["deleted.py"],
+    }
+
+    mock_validate_valid = {
+        "is_valid": True,
+        "reason": "All files exist",
+        "file_changes_detected": [],
+    }
+
+    mock_exec_result = {
+        "success": True,
+        "commit_sha": "abc123",
+        "commit_message": "improve: valid test",
+        "files_changed": ["valid.py"],
+        "new_findings": [],
+        "error": "",
+    }
+
+    # First validate returns stale, second validate returns valid, then execute
+    with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=[
+        mock_validate_stale,
+        mock_validate_valid,
+        mock_exec_result,
+    ])):
+        with patch.object(improve_app_module.app, 'note', new=MagicMock()):
+            result = await improve(temp_repo, {"max_improvements": 1})
+
+    result_obj = ImproveResult(**result)
+    assert len(result_obj.improvements_skipped) == 1
+    assert result_obj.improvements_skipped[0].id == "stale-imp"
+    assert result_obj.improvements_skipped[0].status == "stale"
+    assert len(result_obj.improvements_completed) == 1
+    assert result_obj.improvements_completed[0].id == "valid-imp"
+    assert result_obj.stopped_reason == "max_improvements_reached"
+
+
+@pytest.mark.asyncio
+async def test_improve_state_json_structure(temp_repo, sample_improvement):
+    """Test that state file has valid JSON structure with all required fields."""
+    from swe_af.improve import app as improve_app_module
+
+    state = ImprovementState(repo_path=temp_repo, improvements=[sample_improvement])
+    _save_state(temp_repo, state)
+
+    mock_validate_result = {
+        "is_valid": True,
+        "reason": "Valid",
+        "file_changes_detected": [],
+    }
+
+    mock_exec_result = {
+        "success": True,
+        "commit_sha": "abc123",
+        "commit_message": "improve: test",
+        "files_changed": ["test.py"],
+        "new_findings": [],
+        "error": "",
+    }
+
+    with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=[mock_validate_result, mock_exec_result])):
+        with patch.object(improve_app_module.app, 'note', new=MagicMock()):
+            result = await improve(temp_repo, {"max_improvements": 1})
+
+    # Load and verify JSON structure
+    state_path = os.path.join(temp_repo, ".swe-af", "improvements.json")
+    assert os.path.exists(state_path)
+
+    with open(state_path, "r") as f:
+        state_data = json.load(f)
+
+    # Verify top-level keys
+    assert "repo_path" in state_data
+    assert "improvements" in state_data
+    assert "last_scan_at" in state_data
+    assert "runs" in state_data
+
+    # Verify improvements structure
+    assert isinstance(state_data["improvements"], list)
+    assert len(state_data["improvements"]) >= 1
+
+    for imp in state_data["improvements"]:
+        assert "id" in imp
+        assert "category" in imp
+        assert "title" in imp
+        assert "description" in imp
+        assert "files" in imp
+        assert "priority" in imp
+        assert "status" in imp
+        assert "found_by_run" in imp
+
+    # Verify runs structure
+    assert isinstance(state_data["runs"], list)
+    assert len(state_data["runs"]) >= 1
+
+    for run in state_data["runs"]:
+        assert "started_at" in run
+        assert "ended_at" in run
+        assert "improvements_found" in run
+        assert "improvements_completed" in run
+        assert "improvements_skipped" in run
+        assert "budget_used_seconds" in run
+        assert "stopped_reason" in run
+
+
+def test_save_state_atomic_write_pattern(temp_repo):
+    """Test that state saving uses atomic write pattern with temp file + rename."""
+    import tempfile as temp_module
+
+    # Track temp file creation
+    original_mkstemp = temp_module.mkstemp
+    temp_files_created = []
+
+    def tracking_mkstemp(*args, **kwargs):
+        fd, path = original_mkstemp(*args, **kwargs)
+        temp_files_created.append(path)
+        return fd, path
+
+    state = ImprovementState(repo_path=temp_repo)
+
+    with patch.object(temp_module, 'mkstemp', side_effect=tracking_mkstemp):
+        _save_state(temp_repo, state)
+
+    # Verify temp file was created
+    assert len(temp_files_created) > 0
+    assert any('.json.tmp' in path for path in temp_files_created)
+
+    # Verify final state file exists
+    state_path = os.path.join(temp_repo, ".swe-af", "improvements.json")
+    assert os.path.exists(state_path)
+
+    # Verify no temp files remain
+    state_dir = os.path.join(temp_repo, ".swe-af")
+    files = os.listdir(state_dir)
+    assert not any(f.endswith(".tmp") for f in files)
+
+
+@pytest.mark.asyncio
+async def test_improve_scanner_failure_resilience(temp_repo):
+    """Test that scanner returning empty results doesn't crash loop."""
+    from swe_af.improve import app as improve_app_module
+
+    # Mock scanner that returns empty results (simulating failure)
+    mock_scan_result = {
+        "new_areas": [],
+        "scan_depth_used": "normal",
+        "summary": "Scanner agent failed to produce results",
+        "files_analyzed": 0,
+    }
+
+    with patch.object(improve_app_module.app, 'call', new=AsyncMock(return_value=mock_scan_result)):
+        with patch.object(improve_app_module.app, 'note', new=MagicMock()):
+            # Should not raise - should handle gracefully
+            result = await improve(temp_repo, {"max_improvements": 1})
+
+    result_obj = ImproveResult(**result)
+    # Should complete without improvements since scanner returned empty
+    assert result_obj.stopped_reason == "no_more_improvements"
+    assert len(result_obj.improvements_completed) == 0
+
+
+@pytest.mark.asyncio
+async def test_improve_validator_failure_resilience(temp_repo, sample_improvement):
+    """Test that validator returning fallback result doesn't crash loop."""
+    from swe_af.improve import app as improve_app_module
+
+    state = ImprovementState(repo_path=temp_repo, improvements=[sample_improvement])
+    _save_state(temp_repo, state)
+
+    # Mock validator that returns fallback (is_valid=True, assumes valid)
+    mock_validate_result = {
+        "is_valid": True,
+        "reason": "Validator failed — assuming valid",
+        "file_changes_detected": [],
+    }
+
+    mock_exec_result = {
+        "success": True,
+        "commit_sha": "abc123",
+        "commit_message": "improve: test",
+        "files_changed": ["test.py"],
+        "new_findings": [],
+        "error": "",
+    }
+
+    with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=[mock_validate_result, mock_exec_result])):
+        with patch.object(improve_app_module.app, 'note', new=MagicMock()):
+            # Should not raise - should handle gracefully
+            result = await improve(temp_repo, {"max_improvements": 1})
+
+    # Loop should complete successfully even with validator fallback
+    result_obj = ImproveResult(**result)
+    assert isinstance(result_obj, ImproveResult)
+    assert len(result_obj.improvements_completed) == 1
+
+
+@pytest.mark.asyncio
+async def test_improve_executor_failure_resilience(temp_repo, sample_improvement):
+    """Test that executor returning failure result doesn't crash loop - marks improvement as failed."""
+    from swe_af.improve import app as improve_app_module
+
+    state = ImprovementState(repo_path=temp_repo, improvements=[sample_improvement])
+    _save_state(temp_repo, state)
+
+    mock_validate_result = {
+        "is_valid": True,
+        "reason": "Valid",
+        "file_changes_detected": [],
+    }
+
+    # Mock executor that returns failure (not exception)
+    mock_exec_failure = {
+        "success": False,
+        "commit_sha": None,
+        "commit_message": "",
+        "files_changed": [],
+        "new_findings": [],
+        "error": "Executor agent failed",
+        "tests_passed": False,
+        "verification_output": "",
+    }
+
+    # After failure, loop will try to scan for more (since we only have 1 improvement which failed)
+    # Provide empty scan result to prevent StopAsyncIteration
+    mock_scan_empty = {
+        "new_areas": [],
+        "scan_depth_used": "normal",
+        "summary": "No improvements found",
+        "files_analyzed": 0,
+    }
+
+    with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=[mock_validate_result, mock_exec_failure, mock_scan_empty])):
+        with patch.object(improve_app_module.app, 'note', new=MagicMock()):
+            # Should not raise - should handle gracefully
+            result = await improve(temp_repo, {"max_improvements": 1})
+
+    # Loop should complete without crashing, improvement marked as failed
+    result_obj = ImproveResult(**result)
+    assert isinstance(result_obj, ImproveResult)
+    assert len(result_obj.improvements_failed) == 1
+    assert len(result_obj.improvements_completed) == 0
+
+
+@pytest.mark.asyncio
+async def test_improve_multiple_failures_continue(temp_repo):
+    """Test that multiple failures in sequence don't crash loop - loop continues."""
+    from swe_af.improve import app as improve_app_module
+
+    # Create multiple improvements
+    improvements = [
+        ImprovementArea(
+            id=f"imp-{i}",
+            category="test-coverage",
+            title=f"Test {i}",
+            description=f"Desc {i}",
+            files=[f"file{i}.py"],
+            priority=i,
+            status="pending",
+            found_by_run=datetime.now(timezone.utc).isoformat(),
+        )
+        for i in range(3)
+    ]
+
+    state = ImprovementState(repo_path=temp_repo, improvements=improvements)
+    _save_state(temp_repo, state)
+
+    # First fails, second succeeds, third fails
+    mock_validate_result = {
+        "is_valid": True,
+        "reason": "Valid",
+        "file_changes_detected": [],
+    }
+
+    mock_exec_success = {
+        "success": True,
+        "commit_sha": "abc123",
+        "commit_message": "improve: test",
+        "files_changed": ["test.py"],
+        "new_findings": [],
+        "error": "",
+        "tests_passed": True,
+        "verification_output": "",
+    }
+
+    mock_exec_failure = {
+        "success": False,
+        "commit_sha": None,
+        "commit_message": "",
+        "files_changed": [],
+        "new_findings": [],
+        "error": "Execution failed",
+        "tests_passed": False,
+        "verification_output": "",
+    }
+
+    # Empty scan result for when we run out of improvements
+    mock_scan_empty = {
+        "new_areas": [],
+        "scan_depth_used": "normal",
+        "summary": "No improvements found",
+        "files_analyzed": 0,
+    }
+
+    # Interleave validate and execute calls
+    call_results = [
+        mock_validate_result,  # validate imp-0
+        mock_exec_failure,     # execute imp-0 (fails)
+        mock_validate_result,  # validate imp-1
+        mock_exec_success,     # execute imp-1 (succeeds)
+        mock_validate_result,  # validate imp-2
+        mock_exec_failure,     # execute imp-2 (fails)
+        mock_scan_empty,       # scan when all 3 done
+    ]
+
+    with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=call_results)):
+        with patch.object(improve_app_module.app, 'note', new=MagicMock()):
+            result = await improve(temp_repo, {"max_improvements": 3})
+
+    result_obj = ImproveResult(**result)
+    # Should have 1 completed and 2 failed
+    assert len(result_obj.improvements_completed) == 1
+    assert len(result_obj.improvements_failed) == 2
+    # Loop processes all 3 (fail, success, fail) then finds no more improvements
+    assert result_obj.stopped_reason == "no_more_improvements"
