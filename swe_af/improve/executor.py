@@ -69,7 +69,6 @@ async def execute_improvement(
         cwd=repo_path,
         allowed_tools=allowed_tools,
         max_turns=improve_config.agent_max_turns,
-        system_prompt=EXECUTOR_SYSTEM_PROMPT,
         permission_mode=improve_config.permission_mode or None,
     )
 
@@ -85,33 +84,34 @@ async def execute_improvement(
     try:
         # Wrap ai.run() with asyncio.wait_for for timeout handling
         response = await asyncio.wait_for(
-            ai.run(task_prompt),
+            ai.run(
+                task_prompt,
+                system_prompt=EXECUTOR_SYSTEM_PROMPT,
+                output_schema=ExecutorResult,
+            ),
             timeout=timeout_seconds,
         )
 
         # Parse the result - expecting ExecutorResult JSON
-        if response.parsed:
-            # If we got a parsed result, use it
-            result_dict = response.parsed.model_dump() if hasattr(response.parsed, 'model_dump') else dict(response.parsed)
-            result = ExecutorResult.model_validate(result_dict)
-        elif response.result:
-            # Try to parse from result text
-            import json
-            result_dict = json.loads(response.result)
-            result = ExecutorResult.model_validate(result_dict)
-        else:
-            # Fallback: extract from text response
-            import json
-            result_dict = json.loads(response.text)
-            result = ExecutorResult.model_validate(result_dict)
+        if response.parsed is not None:
+            result: ExecutorResult = response.parsed
+            _note(
+                f"Executor: completed improvement {improvement_area.get('id', 'unknown')}, "
+                f"success={result.success}",
+                tags=["improve_executor", "complete"],
+            )
+            return result.model_dump()
 
+        # If parsed is None, treat as error
         _note(
-            f"Executor: completed improvement {improvement_area.get('id', 'unknown')}, "
-            f"success={result.success}",
-            tags=["improve_executor", "complete"],
+            f"Executor: improvement {improvement_area.get('id', 'unknown')} "
+            "returned unparseable response",
+            tags=["improve_executor", "error"],
         )
-
-        return result.model_dump()
+        return ExecutorResult(
+            success=False,
+            error="Agent returned unparseable response",
+        ).model_dump()
 
     except asyncio.TimeoutError:
         _note(

@@ -1,433 +1,675 @@
-"""Unit tests for swe_af.improve.executor module."""
+"""Unit tests for swe_af.improve.executor module.
+
+Tests cover all acceptance criteria:
+- AC1: execute_improvement is decorated with @improve_router.reasoner()
+- AC2: Function signature: improvement_area: dict, repo_path: str, timeout_seconds: int, config: dict -> dict
+- AC3: Accepts ImproveConfig dict, resolves to executor_model via improve_resolve_models
+- AC4: Creates AgentAI instance with correct provider, model, cwd, allowed_tools (READ, WRITE, EDIT, BASH, GLOB, GREP)
+- AC5: AgentAI max_turns respects config.agent_max_turns
+- AC6: Wraps ai.run() call with asyncio.wait_for(coro, timeout=timeout_seconds)
+- AC7: On asyncio.TimeoutError: returns ExecutorResult(success=False, error='Timed out after Xs')
+- AC8: On success: returns ExecutorResult.model_dump() including commit_sha and new_findings list
+- AC9: On other errors: returns ExecutorResult(success=False, error=str(e))
+- AC10: Uses improve_router.note() for instrumentation (start, complete, timeout, error tags)
+"""
 
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+import inspect
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from swe_af.improve.schemas import ExecutorResult
+from agentfield import AgentRouter
+from swe_af.improve.schemas import ExecutorResult, ImprovementArea
 
 
-class TestExecuteImprovement:
-    """Tests for execute_improvement reasoner."""
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
 
-    @pytest.fixture
-    def improvement_area(self):
-        """Sample improvement area for testing."""
-        return {
-            "id": "test-improvement",
-            "category": "test-coverage",
-            "title": "Add missing tests",
-            "description": "Add unit tests for authentication module",
-            "files": ["src/auth.py"],
-            "priority": 5,
-            "status": "pending",
-            "found_by_run": "2024-01-01T00:00:00Z",
-        }
 
-    @pytest.fixture
-    def config(self):
-        """Sample ImproveConfig for testing."""
-        return {
-            "runtime": "claude_code",
-            "models": None,
-            "max_time_seconds": 3600,
-            "max_improvements": 10,
-            "permission_mode": "",
-            "scan_depth": "normal",
-            "categories": None,
-            "agent_max_turns": 50,
-        }
+def _registered_names(router: AgentRouter) -> set[str]:
+    """Get set of registered reasoner function names from a router."""
+    return {r["func"].__name__ for r in router.reasoners}
 
-    @pytest.fixture
-    def temp_repo_dir(self, tmp_path):
-        """Create a temporary repository directory for testing."""
-        repo_dir = tmp_path / "test_repo"
-        repo_dir.mkdir()
-        return str(repo_dir)
 
-    @pytest.mark.asyncio
-    async def test_executor_task_prompt_built_correctly(self, improvement_area, config, temp_repo_dir):
-        """Test that executor_task_prompt is built with correct parameters."""
+def _run(coro):
+    """Run an async coroutine synchronously for tests."""
+    return asyncio.run(coro)
+
+
+def _make_mock_response(parsed: ExecutorResult | None) -> MagicMock:
+    """Create a mock AgentResponse with the given parsed result."""
+    response = MagicMock()
+    response.parsed = parsed
+    return response
+
+
+# ---------------------------------------------------------------------------
+# AC1: execute_improvement is registered on improve_router
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteImprovementRegistered:
+    """Test that execute_improvement is decorated with @improve_router.reasoner()."""
+
+    def test_execute_improvement_is_registered_on_improve_router(self) -> None:
+        """execute_improvement should be registered on improve_router."""
+        from swe_af.improve.executor import execute_improvement  # noqa: F401
+        from swe_af.improve import improve_router
+
+        names = _registered_names(improve_router)
+        assert "execute_improvement" in names, (
+            f"execute_improvement not registered on improve_router. Found: {names}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# AC2: Function signature verification
+# ---------------------------------------------------------------------------
+
+
+class TestFunctionSignature:
+    """Test that execute_improvement has the correct function signature."""
+
+    def test_function_signature_matches_spec(self) -> None:
+        """execute_improvement should accept improvement_area, repo_path, timeout_seconds, config."""
         from swe_af.improve.executor import execute_improvement
 
-        with patch("swe_af.agent_ai.client.AgentAI") as mock_agent_class:
-            mock_ai = AsyncMock()
-            mock_agent_class.return_value = mock_ai
+        sig = inspect.signature(execute_improvement)
+        params = list(sig.parameters.keys())
+        assert params == ["improvement_area", "repo_path", "timeout_seconds", "config"], (
+            f"Expected params ['improvement_area', 'repo_path', 'timeout_seconds', 'config'], got {params}"
+        )
 
-            # Mock successful response
-            mock_response = MagicMock()
-            mock_response.parsed = None
-            mock_response.result = '{"success": true, "commit_sha": "abc123"}'
-            mock_ai.run.return_value = mock_response
-
-            with patch("swe_af.improve.prompts.executor_task_prompt") as mock_prompt_builder:
-                mock_prompt_builder.return_value = "test prompt"
-
-                await execute_improvement(
-                    improvement_area,
-                    temp_repo_dir,
-                    300,
-                    config,
-                )
-
-                # Verify executor_task_prompt was called with correct args
-                mock_prompt_builder.assert_called_once_with(
-                    improvement=improvement_area,
-                    repo_path=temp_repo_dir,
-                    timeout_seconds=300,
-                )
-
-    @pytest.mark.asyncio
-    async def test_agent_ai_initialized_with_all_six_tools(self, improvement_area, config, temp_repo_dir):
-        """Test that AgentAI is initialized with READ, WRITE, EDIT, BASH, GLOB, GREP."""
+    def test_function_is_async(self) -> None:
+        """execute_improvement should be an async function."""
         from swe_af.improve.executor import execute_improvement
 
-        with patch("swe_af.agent_ai.client.AgentAI") as mock_agent_class:
-            mock_ai = AsyncMock()
-            mock_agent_class.return_value = mock_ai
+        assert asyncio.iscoroutinefunction(execute_improvement), (
+            "execute_improvement must be an async function"
+        )
 
-            # Mock successful response
-            mock_response = MagicMock()
-            mock_response.parsed = None
-            mock_response.result = '{"success": true, "commit_sha": "abc123"}'
-            mock_ai.run.return_value = mock_response
 
-            await execute_improvement(
-                improvement_area,
-                "/test/repo",
-                300,
-                config,
+# ---------------------------------------------------------------------------
+# AC3: ImproveConfig parsing and model resolution
+# ---------------------------------------------------------------------------
+
+
+class TestConfigParsingAndModelResolution:
+    """Test that execute_improvement correctly parses config and resolves models."""
+
+    @patch("swe_af.improve.executor.AgentAI")
+    def test_uses_improve_resolve_models(self, mock_agent_ai_class: MagicMock) -> None:
+        """execute_improvement should use improve_resolve_models to get executor_model."""
+        from swe_af.improve.executor import execute_improvement
+
+        # Setup mock
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock(
+            return_value=_make_mock_response(
+                ExecutorResult(success=True, commit_sha="abc123")
             )
+        )
+        mock_agent_ai_class.return_value = mock_ai_instance
 
-            # Verify AgentAI was initialized
-            assert mock_agent_class.called
-            agent_config = mock_agent_class.call_args[1]["config"]
-
-            # Verify all 6 tools are present
-            from swe_af.agent_ai.types import Tool
-            expected_tools = [
-                Tool.READ,
-                Tool.WRITE,
-                Tool.EDIT,
-                Tool.BASH,
-                Tool.GLOB,
-                Tool.GREP,
-            ]
-            assert agent_config.allowed_tools == expected_tools
-
-    @pytest.mark.asyncio
-    async def test_agent_ai_max_turns_respects_config(self, improvement_area, temp_repo_dir):
-        """Test that AgentAI max_turns respects config.agent_max_turns."""
-        from swe_af.improve.executor import execute_improvement
-
-        config = {
-            "runtime": "claude_code",
-            "models": None,
-            "max_time_seconds": 3600,
-            "max_improvements": 10,
-            "permission_mode": "",
-            "scan_depth": "normal",
-            "categories": None,
-            "agent_max_turns": 75,  # Custom value
-        }
-
-        with patch("swe_af.agent_ai.client.AgentAI") as mock_agent_class:
-            mock_ai = AsyncMock()
-            mock_agent_class.return_value = mock_ai
-
-            # Mock successful response
-            mock_response = MagicMock()
-            mock_response.parsed = None
-            mock_response.result = '{"success": true, "commit_sha": "abc123"}'
-            mock_ai.run.return_value = mock_response
-
-            await execute_improvement(
-                improvement_area,
-                "/test/repo",
-                300,
-                config,
-            )
-
-            # Verify max_turns is set correctly
-            agent_config = mock_agent_class.call_args[1]["config"]
-            assert agent_config.max_turns == 75
-
-    @pytest.mark.asyncio
-    async def test_ai_run_wrapped_with_asyncio_wait_for(self, improvement_area, config, temp_repo_dir):
-        """Test that ai.run() is wrapped with asyncio.wait_for with timeout_seconds."""
-        from swe_af.improve.executor import execute_improvement
-
-        with patch("swe_af.agent_ai.client.AgentAI") as mock_agent_class:
-            mock_ai = AsyncMock()
-            mock_agent_class.return_value = mock_ai
-
-            # Mock successful response
-            mock_response = MagicMock()
-            mock_response.parsed = None
-            mock_response.result = '{"success": true, "commit_sha": "abc123"}'
-
-            # Track the call to ai.run
-            async def mock_run(*args, **kwargs):
-                return mock_response
-
-            mock_ai.run = AsyncMock(side_effect=mock_run)
-
-            # Spy on asyncio.wait_for
-            original_wait_for = asyncio.wait_for
-            wait_for_called = []
-
-            async def spy_wait_for(coro, timeout):
-                wait_for_called.append({"timeout": timeout})
-                return await original_wait_for(coro, timeout=timeout)
-
-            with patch("asyncio.wait_for", side_effect=spy_wait_for):
-                await execute_improvement(
-                    improvement_area,
-                    temp_repo_dir,
-                    300,
-                    config,
-                )
-
-                # Verify asyncio.wait_for was called with correct timeout
-                assert len(wait_for_called) == 1
-                assert wait_for_called[0]["timeout"] == 300
-
-    @pytest.mark.asyncio
-    async def test_timeout_returns_executor_result_with_error(self, improvement_area, config, temp_repo_dir):
-        """Test that asyncio.TimeoutError returns ExecutorResult(success=False, error='Timed out...')."""
-        from swe_af.improve.executor import execute_improvement
-
-        with patch("swe_af.agent_ai.client.AgentAI") as mock_agent_class:
-            mock_ai = AsyncMock()
-            mock_agent_class.return_value = mock_ai
-
-            # Make ai.run timeout
-            async def timeout_run(*args, **kwargs):
-                await asyncio.sleep(10)  # Never completes
-
-            mock_ai.run = AsyncMock(side_effect=timeout_run)
-
-            # Patch asyncio.wait_for to raise timeout immediately
-            async def immediate_timeout(*args, **kwargs):
-                raise asyncio.TimeoutError()
-
-            with patch("asyncio.wait_for", side_effect=immediate_timeout):
-                result = await execute_improvement(
-                    improvement_area,
-                    temp_repo_dir,
-                    300,
-                    config,
-                )
-
-                # Verify result indicates timeout
-                assert result["success"] is False
-                assert "Timed out after 300s" in result["error"]
-                assert result["commit_sha"] is None
-
-    @pytest.mark.asyncio
-    async def test_success_path_returns_commit_sha_and_new_findings(self, improvement_area, config, temp_repo_dir):
-        """Test that success path returns ExecutorResult with commit_sha and new_findings list."""
-        from swe_af.improve.executor import execute_improvement
-
-        with patch("swe_af.agent_ai.client.AgentAI") as mock_agent_class:
-            mock_ai = AsyncMock()
-            mock_agent_class.return_value = mock_ai
-
-            # Mock successful response with new_findings
-            executor_result = ExecutorResult(
-                success=True,
-                commit_sha="abc123def456",
-                commit_message="improve: add missing tests",
-                files_changed=["src/auth.py", "tests/test_auth.py"],
-                new_findings=[
-                    {
-                        "id": "new-improvement",
-                        "category": "documentation",
-                        "title": "Add docstrings",
-                        "description": "Add missing docstrings to auth module",
-                        "files": ["src/auth.py"],
-                        "priority": 7,
-                        "status": "pending",
-                        "found_by_run": "2024-01-01T00:00:00Z",
-                    }
-                ],
-                tests_passed=True,
-                verification_output="All tests passed",
-            )
-
-            mock_response = MagicMock()
-            mock_response.parsed = None
-            mock_response.result = executor_result.model_dump_json()
-            mock_ai.run.return_value = mock_response
-
-            result = await execute_improvement(
-                improvement_area,
-                "/test/repo",
-                300,
-                config,
-            )
-
-            # Verify success response
-            assert result["success"] is True
-            assert result["commit_sha"] == "abc123def456"
-            assert result["commit_message"] == "improve: add missing tests"
-            assert len(result["new_findings"]) == 1
-            assert result["new_findings"][0]["id"] == "new-improvement"
-            assert result["tests_passed"] is True
-
-    @pytest.mark.asyncio
-    async def test_failure_path_returns_executor_result_with_error(self, improvement_area, config, temp_repo_dir):
-        """Test that general exceptions return ExecutorResult(success=False, error=str(e))."""
-        from swe_af.improve.executor import execute_improvement
-
-        with patch("swe_af.agent_ai.client.AgentAI") as mock_agent_class:
-            mock_ai = AsyncMock()
-            mock_agent_class.return_value = mock_ai
-
-            # Make ai.run raise a general exception
-            mock_ai.run.side_effect = RuntimeError("Test error")
-
-            result = await execute_improvement(
-                improvement_area,
-                "/test/repo",
-                300,
-                config,
-            )
-
-            # Verify error handling
-            assert result["success"] is False
-            assert "Test error" in result["error"]
-            assert result["commit_sha"] is None
-
-    @pytest.mark.asyncio
-    async def test_executor_resolves_model_via_improve_resolve_models(self, improvement_area, temp_repo_dir):
-        """Test that executor uses improve_resolve_models to get executor_model."""
-        from swe_af.improve.executor import execute_improvement
-
+        # Call execute_improvement with a specific runtime and models config
         config = {
             "runtime": "claude_code",
             "models": {"executor": "opus"},
-            "max_time_seconds": 3600,
-            "max_improvements": 10,
-            "permission_mode": "",
-            "scan_depth": "normal",
-            "categories": None,
-            "agent_max_turns": 50,
+            "agent_max_turns": 30,
+        }
+        improvement = {
+            "id": "test-improvement",
+            "category": "test-coverage",
+            "title": "Test Improvement",
+            "description": "Test description",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
         }
 
-        with patch("swe_af.agent_ai.client.AgentAI") as mock_agent_class:
-            mock_ai = AsyncMock()
-            mock_agent_class.return_value = mock_ai
+        _run(execute_improvement(improvement, "/fake/repo", 120, config))
 
-            # Mock successful response
-            mock_response = MagicMock()
-            mock_response.parsed = None
-            mock_response.result = '{"success": true, "commit_sha": "abc123"}'
-            mock_ai.run.return_value = mock_response
+        # Verify AgentAI was instantiated with executor_model='opus'
+        assert mock_agent_ai_class.call_count == 1
+        agent_config = mock_agent_ai_class.call_args[1]["config"]
+        assert agent_config.model == "opus", f"Expected model='opus', got {agent_config.model}"
 
-            await execute_improvement(
-                improvement_area,
-                "/test/repo",
-                300,
-                config,
-            )
 
-            # Verify model was resolved correctly
-            agent_config = mock_agent_class.call_args[1]["config"]
-            assert agent_config.model == "opus"
+# ---------------------------------------------------------------------------
+# AC4: AgentAI instance creation with correct tools
+# ---------------------------------------------------------------------------
 
-    @pytest.mark.asyncio
-    async def test_provider_set_based_on_runtime(self, improvement_area, temp_repo_dir):
-        """Test that provider is set to 'opencode' for open_code runtime."""
+
+class TestAgentAICreation:
+    """Test that execute_improvement creates AgentAI with correct parameters."""
+
+    @patch("swe_af.improve.executor.AgentAI")
+    def test_creates_agent_ai_with_correct_provider_and_tools(self, mock_agent_ai_class: MagicMock) -> None:
+        """execute_improvement should create AgentAI with provider, model, cwd, and 6 tools."""
         from swe_af.improve.executor import execute_improvement
+        from swe_af.agent_ai.types import Tool
 
-        config = {
-            "runtime": "open_code",
-            "models": None,
-            "max_time_seconds": 3600,
-            "max_improvements": 10,
-            "permission_mode": "",
-            "scan_depth": "normal",
-            "categories": None,
-            "agent_max_turns": 50,
+        # Setup mock
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock(
+            return_value=_make_mock_response(
+                ExecutorResult(success=True, commit_sha="abc123")
+            )
+        )
+        mock_agent_ai_class.return_value = mock_ai_instance
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "test-improvement",
+            "category": "test-coverage",
+            "title": "Test Improvement",
+            "description": "Test description",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
         }
 
-        with patch("swe_af.agent_ai.client.AgentAI") as mock_agent_class:
-            mock_ai = AsyncMock()
-            mock_agent_class.return_value = mock_ai
+        _run(execute_improvement(improvement, "/repo/path", 300, config))
 
-            # Mock successful response
-            mock_response = MagicMock()
-            mock_response.parsed = None
-            mock_response.result = '{"success": true, "commit_sha": "abc123"}'
-            mock_ai.run.return_value = mock_response
+        # Verify AgentAI instantiation
+        assert mock_agent_ai_class.call_count == 1
+        agent_config = mock_agent_ai_class.call_args[1]["config"]
 
-            await execute_improvement(
-                improvement_area,
-                "/test/repo",
-                300,
-                config,
-            )
+        # Check provider mapping (claude_code -> claude)
+        assert agent_config.provider == "claude", f"Expected provider='claude', got {agent_config.provider}"
 
-            # Verify provider was set correctly
-            agent_config = mock_agent_class.call_args[1]["config"]
-            assert agent_config.provider == "opencode"
+        # Check cwd
+        assert agent_config.cwd == "/repo/path", f"Expected cwd='/repo/path', got {agent_config.cwd}"
 
-    @pytest.mark.asyncio
-    async def test_new_findings_returned_as_list_of_dicts(self, improvement_area, config, temp_repo_dir):
-        """Test that new_findings are returned as a list of dicts (ImprovementArea)."""
+        # Check allowed_tools (should have READ, WRITE, EDIT, BASH, GLOB, GREP)
+        expected_tools = {Tool.READ, Tool.WRITE, Tool.EDIT, Tool.BASH, Tool.GLOB, Tool.GREP}
+        actual_tools = set(agent_config.allowed_tools)
+        assert actual_tools == expected_tools, (
+            f"Expected tools {expected_tools}, got {actual_tools}"
+        )
+
+    @patch("swe_af.improve.executor.AgentAI")
+    def test_provider_mapping_open_code(self, mock_agent_ai_class: MagicMock) -> None:
+        """execute_improvement should map 'open_code' runtime to 'opencode' provider."""
         from swe_af.improve.executor import execute_improvement
 
-        with patch("swe_af.agent_ai.client.AgentAI") as mock_agent_class:
-            mock_ai = AsyncMock()
-            mock_agent_class.return_value = mock_ai
-
-            # Mock successful response with multiple new findings
-            executor_result = ExecutorResult(
-                success=True,
-                commit_sha="abc123",
-                new_findings=[
-                    {
-                        "id": "finding-1",
-                        "category": "test-coverage",
-                        "title": "Add tests for module A",
-                        "description": "Missing tests",
-                        "files": ["a.py"],
-                        "priority": 5,
-                        "status": "pending",
-                        "found_by_run": "2024-01-01T00:00:00Z",
-                    },
-                    {
-                        "id": "finding-2",
-                        "category": "documentation",
-                        "title": "Add docstrings",
-                        "description": "Missing docstrings",
-                        "files": ["b.py"],
-                        "priority": 6,
-                        "status": "pending",
-                        "found_by_run": "2024-01-01T00:00:00Z",
-                    },
-                ],
+        # Setup mock
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock(
+            return_value=_make_mock_response(
+                ExecutorResult(success=True, commit_sha="abc123")
             )
+        )
+        mock_agent_ai_class.return_value = mock_ai_instance
 
-            mock_response = MagicMock()
-            mock_response.parsed = None
-            mock_response.result = executor_result.model_dump_json()
-            mock_ai.run.return_value = mock_response
+        config = {"runtime": "open_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "test-improvement",
+            "category": "test-coverage",
+            "title": "Test Improvement",
+            "description": "Test description",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
 
-            result = await execute_improvement(
-                improvement_area,
-                "/test/repo",
-                300,
-                config,
+        _run(execute_improvement(improvement, "/repo/path", 300, config))
+
+        # Verify provider
+        agent_config = mock_agent_ai_class.call_args[1]["config"]
+        assert agent_config.provider == "opencode", f"Expected provider='opencode', got {agent_config.provider}"
+
+
+# ---------------------------------------------------------------------------
+# AC5: AgentAI max_turns respects config.agent_max_turns
+# ---------------------------------------------------------------------------
+
+
+class TestMaxTurnsConfiguration:
+    """Test that execute_improvement respects config.agent_max_turns."""
+
+    @patch("swe_af.improve.executor.AgentAI")
+    def test_respects_agent_max_turns(self, mock_agent_ai_class: MagicMock) -> None:
+        """execute_improvement should set AgentAI max_turns from config.agent_max_turns."""
+        from swe_af.improve.executor import execute_improvement
+
+        # Setup mock
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock(
+            return_value=_make_mock_response(
+                ExecutorResult(success=True, commit_sha="abc123")
             )
+        )
+        mock_agent_ai_class.return_value = mock_ai_instance
 
-            # Verify new_findings is a list of dicts
-            assert isinstance(result["new_findings"], list)
-            assert len(result["new_findings"]) == 2
-            assert all(isinstance(f, dict) for f in result["new_findings"])
-            assert result["new_findings"][0]["id"] == "finding-1"
-            assert result["new_findings"][1]["id"] == "finding-2"
+        config = {"runtime": "claude_code", "agent_max_turns": 42}
+        improvement = {
+            "id": "test-improvement",
+            "category": "test-coverage",
+            "title": "Test Improvement",
+            "description": "Test description",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+
+        _run(execute_improvement(improvement, "/repo/path", 300, config))
+
+        # Verify max_turns
+        agent_config = mock_agent_ai_class.call_args[1]["config"]
+        assert agent_config.max_turns == 42, f"Expected max_turns=42, got {agent_config.max_turns}"
+
+
+# ---------------------------------------------------------------------------
+# AC6: ai.run() wrapped with asyncio.wait_for
+# ---------------------------------------------------------------------------
+
+
+class TestTimeoutWrapping:
+    """Test that execute_improvement wraps ai.run() with asyncio.wait_for."""
+
+    @patch("swe_af.improve.executor.AgentAI")
+    @patch("swe_af.improve.executor.asyncio.wait_for")
+    def test_wraps_ai_run_with_asyncio_wait_for(
+        self, mock_wait_for: AsyncMock, mock_agent_ai_class: MagicMock
+    ) -> None:
+        """execute_improvement should wrap ai.run() with asyncio.wait_for(timeout=timeout_seconds)."""
+        from swe_af.improve.executor import execute_improvement
+
+        # Setup mock
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock()
+        mock_agent_ai_class.return_value = mock_ai_instance
+
+        mock_wait_for.return_value = _make_mock_response(
+            ExecutorResult(success=True, commit_sha="abc123")
+        )
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "test-improvement",
+            "category": "test-coverage",
+            "title": "Test Improvement",
+            "description": "Test description",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+        timeout_seconds = 180
+
+        _run(execute_improvement(improvement, "/repo/path", timeout_seconds, config))
+
+        # Verify asyncio.wait_for was called with timeout
+        assert mock_wait_for.call_count == 1
+        _, kwargs = mock_wait_for.call_args
+        assert kwargs.get("timeout") == timeout_seconds, (
+            f"Expected timeout={timeout_seconds}, got {kwargs.get('timeout')}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# AC7: Timeout handling
+# ---------------------------------------------------------------------------
+
+
+class TestTimeoutHandling:
+    """Test that execute_improvement handles asyncio.TimeoutError correctly."""
+
+    @patch("swe_af.improve.executor.AgentAI")
+    def test_returns_timeout_error_on_timeout(self, mock_agent_ai_class: MagicMock) -> None:
+        """execute_improvement should return ExecutorResult with timeout error on asyncio.TimeoutError."""
+        from swe_af.improve.executor import execute_improvement
+
+        # Setup mock to raise TimeoutError
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_agent_ai_class.return_value = mock_ai_instance
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "timeout-test",
+            "category": "test-coverage",
+            "title": "Timeout Test",
+            "description": "Test timeout handling",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+        timeout_seconds = 120
+
+        result = _run(execute_improvement(improvement, "/repo/path", timeout_seconds, config))
+
+        # Verify result structure
+        assert result["success"] is False, "Expected success=False on timeout"
+        assert "Timed out after 120s" in result["error"], (
+            f"Expected timeout error message, got {result['error']}"
+        )
+
+    def test_logs_timeout_with_correct_tags(self) -> None:
+        """execute_improvement should call _note() with 'timeout' tag on timeout."""
+        from swe_af.improve.executor import execute_improvement
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "timeout-test",
+            "category": "test-coverage",
+            "title": "Timeout Test",
+            "description": "Test timeout handling",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+
+        with patch("swe_af.improve.executor.AgentAI") as mock_agent_ai_class:
+            with patch("swe_af.improve.executor._note") as mock_note:
+                # Setup mock to raise TimeoutError
+                mock_ai_instance = MagicMock()
+                mock_ai_instance.run = AsyncMock(side_effect=asyncio.TimeoutError())
+                mock_agent_ai_class.return_value = mock_ai_instance
+
+                _run(execute_improvement(improvement, "/repo/path", 120, config))
+
+                # Verify _note was called with timeout tag
+                note_calls = [call for call in mock_note.call_args_list]
+                timeout_calls = [
+                    call for call in note_calls
+                    if call[1].get("tags") and "improve_executor" in call[1]["tags"] and "timeout" in call[1]["tags"]
+                ]
+                assert len(timeout_calls) > 0, "Expected _note() to be called with 'timeout' tag"
+
+
+# ---------------------------------------------------------------------------
+# AC8: Success path with commit_sha and new_findings
+# ---------------------------------------------------------------------------
+
+
+class TestSuccessPath:
+    """Test that execute_improvement returns ExecutorResult.model_dump() on success."""
+
+    @patch("swe_af.improve.executor.AgentAI")
+    def test_returns_executor_result_on_success(self, mock_agent_ai_class: MagicMock) -> None:
+        """execute_improvement should return ExecutorResult.model_dump() on success."""
+        from swe_af.improve.executor import execute_improvement
+
+        # Setup mock with successful result
+        new_finding = ImprovementArea(
+            id="new-finding",
+            category="code-quality",
+            title="New Finding",
+            description="Found during execution",
+            files=["new.py"],
+            found_by_run="2024-01-01T00:00:00Z",
+        )
+        expected_result = ExecutorResult(
+            success=True,
+            commit_sha="abc123def456",
+            commit_message="improve: add missing tests",
+            files_changed=["test.py", "test_module.py"],
+            new_findings=[new_finding],
+            tests_passed=True,
+        )
+
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock(
+            return_value=_make_mock_response(expected_result)
+        )
+        mock_agent_ai_class.return_value = mock_ai_instance
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "test-improvement",
+            "category": "test-coverage",
+            "title": "Test Improvement",
+            "description": "Test description",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+
+        result = _run(execute_improvement(improvement, "/repo/path", 300, config))
+
+        # Verify result structure
+        assert result["success"] is True, "Expected success=True"
+        assert result["commit_sha"] == "abc123def456", f"Expected commit_sha, got {result.get('commit_sha')}"
+        assert result["commit_message"] == "improve: add missing tests"
+        assert result["files_changed"] == ["test.py", "test_module.py"]
+        assert len(result["new_findings"]) == 1, f"Expected 1 new_finding, got {len(result['new_findings'])}"
+        assert result["new_findings"][0]["id"] == "new-finding"
+        assert result["tests_passed"] is True
+
+    @patch("swe_af.improve.executor.AgentAI")
+    def test_passes_system_prompt_and_output_schema(self, mock_agent_ai_class: MagicMock) -> None:
+        """execute_improvement should pass EXECUTOR_SYSTEM_PROMPT and ExecutorResult to ai.run()."""
+        from swe_af.improve.executor import execute_improvement
+
+        # Setup mock
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock(
+            return_value=_make_mock_response(
+                ExecutorResult(success=True, commit_sha="abc123")
+            )
+        )
+        mock_agent_ai_class.return_value = mock_ai_instance
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "test-improvement",
+            "category": "test-coverage",
+            "title": "Test Improvement",
+            "description": "Test description",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+
+        _run(execute_improvement(improvement, "/repo/path", 300, config))
+
+        # Verify ai.run was called with correct parameters
+        assert mock_ai_instance.run.call_count == 1
+        call_args = mock_ai_instance.run.call_args
+
+        # Check that system_prompt is passed
+        assert "system_prompt" in call_args[1], "Expected system_prompt kwarg"
+        from swe_af.improve.prompts import EXECUTOR_SYSTEM_PROMPT
+        assert call_args[1]["system_prompt"] == EXECUTOR_SYSTEM_PROMPT
+
+        # Check that output_schema is ExecutorResult
+        assert "output_schema" in call_args[1], "Expected output_schema kwarg"
+        from swe_af.improve.schemas import ExecutorResult as ExpectedSchema
+        assert call_args[1]["output_schema"] is ExpectedSchema
+
+
+# ---------------------------------------------------------------------------
+# AC9: Error handling
+# ---------------------------------------------------------------------------
+
+
+class TestErrorHandling:
+    """Test that execute_improvement handles errors correctly."""
+
+    @patch("swe_af.improve.executor.AgentAI")
+    def test_returns_error_result_on_exception(self, mock_agent_ai_class: MagicMock) -> None:
+        """execute_improvement should return ExecutorResult(success=False, error=str(e)) on exception."""
+        from swe_af.improve.executor import execute_improvement
+
+        # Setup mock to raise exception
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock(side_effect=ValueError("Test error"))
+        mock_agent_ai_class.return_value = mock_ai_instance
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "error-test",
+            "category": "test-coverage",
+            "title": "Error Test",
+            "description": "Test error handling",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+
+        result = _run(execute_improvement(improvement, "/repo/path", 300, config))
+
+        # Verify result structure
+        assert result["success"] is False, "Expected success=False on error"
+        assert "Test error" in result["error"], f"Expected error message, got {result['error']}"
+
+    @patch("swe_af.improve.executor.AgentAI")
+    def test_returns_error_when_parsed_is_none(self, mock_agent_ai_class: MagicMock) -> None:
+        """execute_improvement should return error when response.parsed is None."""
+        from swe_af.improve.executor import execute_improvement
+
+        # Setup mock with parsed=None
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock(
+            return_value=_make_mock_response(None)
+        )
+        mock_agent_ai_class.return_value = mock_ai_instance
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "error-test",
+            "category": "test-coverage",
+            "title": "Error Test",
+            "description": "Test error handling",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+
+        result = _run(execute_improvement(improvement, "/repo/path", 300, config))
+
+        # Verify result structure
+        assert result["success"] is False, "Expected success=False when parsed is None"
+        assert "unparseable" in result["error"].lower(), f"Expected unparseable error, got {result['error']}"
+
+
+# ---------------------------------------------------------------------------
+# AC10: Instrumentation with improve_router.note()
+# ---------------------------------------------------------------------------
+
+
+class TestInstrumentation:
+    """Test that execute_improvement uses improve_router.note() correctly."""
+
+    def test_logs_start_and_complete_tags(self) -> None:
+        """execute_improvement should call _note() with start and complete tags."""
+        from swe_af.improve.executor import execute_improvement
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "instrumentation-test",
+            "category": "test-coverage",
+            "title": "Instrumentation Test",
+            "description": "Test instrumentation",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+
+        with patch("swe_af.improve.executor.AgentAI") as mock_agent_ai_class:
+            with patch("swe_af.improve.executor._note") as mock_note:
+                # Setup mock
+                mock_ai_instance = MagicMock()
+                mock_ai_instance.run = AsyncMock(
+                    return_value=_make_mock_response(
+                        ExecutorResult(success=True, commit_sha="abc123")
+                    )
+                )
+                mock_agent_ai_class.return_value = mock_ai_instance
+
+                _run(execute_improvement(improvement, "/repo/path", 300, config))
+
+                # Verify _note was called
+                note_calls = [call for call in mock_note.call_args_list]
+                assert len(note_calls) >= 2, "Expected at least 2 calls to _note()"
+
+                # Check for start tag
+                start_calls = [
+                    call for call in note_calls
+                    if call[1].get("tags") and "start" in call[1]["tags"]
+                ]
+                assert len(start_calls) > 0, "Expected _note() to be called with 'start' tag"
+
+                # Check for complete tag
+                complete_calls = [
+                    call for call in note_calls
+                    if call[1].get("tags") and "complete" in call[1]["tags"]
+                ]
+                assert len(complete_calls) > 0, "Expected _note() to be called with 'complete' tag"
+
+    def test_logs_error_tag_on_failure(self) -> None:
+        """execute_improvement should call _note() with error tag on failure."""
+        from swe_af.improve.executor import execute_improvement
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "error-test",
+            "category": "test-coverage",
+            "title": "Error Test",
+            "description": "Test error handling",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+
+        with patch("swe_af.improve.executor.AgentAI") as mock_agent_ai_class:
+            with patch("swe_af.improve.executor._note") as mock_note:
+                # Setup mock to raise exception
+                mock_ai_instance = MagicMock()
+                mock_ai_instance.run = AsyncMock(side_effect=RuntimeError("Test error"))
+                mock_agent_ai_class.return_value = mock_ai_instance
+
+                _run(execute_improvement(improvement, "/repo/path", 300, config))
+
+                # Verify _note was called with error tag
+                note_calls = [call for call in mock_note.call_args_list]
+                error_calls = [
+                    call for call in note_calls
+                    if call[1].get("tags") and "error" in call[1]["tags"]
+                ]
+                assert len(error_calls) > 0, "Expected _note() to be called with 'error' tag"
+
+
+# ---------------------------------------------------------------------------
+# Integration test: executor_task_prompt building
+# ---------------------------------------------------------------------------
+
+
+class TestTaskPromptBuilding:
+    """Test that execute_improvement builds the task prompt correctly."""
+
+    @patch("swe_af.improve.executor.AgentAI")
+    def test_builds_task_prompt_with_all_params(self, mock_agent_ai_class: MagicMock) -> None:
+        """execute_improvement should build task prompt with improvement, repo_path, timeout_seconds."""
+        from swe_af.improve.executor import execute_improvement
+
+        # Setup mock
+        mock_ai_instance = MagicMock()
+        mock_ai_instance.run = AsyncMock(
+            return_value=_make_mock_response(
+                ExecutorResult(success=True, commit_sha="abc123")
+            )
+        )
+        mock_agent_ai_class.return_value = mock_ai_instance
+
+        config = {"runtime": "claude_code", "agent_max_turns": 50}
+        improvement = {
+            "id": "prompt-test",
+            "category": "test-coverage",
+            "title": "Prompt Test",
+            "description": "Test prompt building",
+            "files": ["test.py"],
+            "priority": 3,
+            "notes": "Some notes",
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+        repo_path = "/test/repo"
+        timeout_seconds = 180
+
+        _run(execute_improvement(improvement, repo_path, timeout_seconds, config))
+
+        # Verify ai.run was called and extract the task prompt
+        assert mock_ai_instance.run.call_count == 1
+        call_args = mock_ai_instance.run.call_args
+        task_prompt = call_args[0][0]  # First positional arg
+
+        # Verify task prompt contains expected elements
+        assert "prompt-test" in task_prompt, "Expected improvement ID in task prompt"
+        assert "test-coverage" in task_prompt, "Expected category in task prompt"
+        assert "Prompt Test" in task_prompt, "Expected title in task prompt"
+        assert "Test prompt building" in task_prompt, "Expected description in task prompt"
+        assert "test.py" in task_prompt, "Expected files in task prompt"
+        assert "/test/repo" in task_prompt, "Expected repo_path in task prompt"
+        assert "180" in task_prompt, "Expected timeout_seconds in task prompt"
