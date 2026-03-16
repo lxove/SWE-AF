@@ -20,6 +20,7 @@ asyncio_mode = "auto"
 [project.scripts]
 swe-af = "swe_af.app:main"
 swe-fast = "swe_af.fast.app:main"
+swe-improve = "swe_af.improve.app:main"
 
 [tool.setuptools.packages.find]
 include = ["swe_af*"]
