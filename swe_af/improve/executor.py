@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from swe_af.agent_ai.client import AgentAI, AgentAIConfig
 from swe_af.agent_ai.types import Tool
 from swe_af.improve import improve_router
 from swe_af.improve.prompts import EXECUTOR_SYSTEM_PROMPT, executor_task_prompt
 from swe_af.improve.schemas import ExecutorResult, ImproveConfig, improve_resolve_models
+
+logger = logging.getLogger(__name__)
+
+
+def _note(msg: str, tags: list[str] | None = None) -> None:
+    """Log a message via improve_router.note() when attached, else fall back to logger."""
+    try:
+        improve_router.note(msg, tags=tags or [])
+    except RuntimeError:
+        logger.debug("[executor] %s (tags=%s)", msg, tags)
 
 
 @improve_router.reasoner()
@@ -29,7 +40,7 @@ async def execute_improvement(
     Returns:
         ExecutorResult.model_dump() with execution results.
     """
-    improve_router.note(
+    _note(
         f"Executor: starting improvement {improvement_area.get('id', 'unknown')}",
         tags=["improve_executor", "start"],
     )
@@ -94,7 +105,7 @@ async def execute_improvement(
             result_dict = json.loads(response.text)
             result = ExecutorResult.model_validate(result_dict)
 
-        improve_router.note(
+        _note(
             f"Executor: completed improvement {improvement_area.get('id', 'unknown')}, "
             f"success={result.success}",
             tags=["improve_executor", "complete"],
@@ -103,7 +114,7 @@ async def execute_improvement(
         return result.model_dump()
 
     except asyncio.TimeoutError:
-        improve_router.note(
+        _note(
             f"Executor: improvement {improvement_area.get('id', 'unknown')} "
             f"timed out after {timeout_seconds}s",
             tags=["improve_executor", "timeout"],
@@ -114,7 +125,7 @@ async def execute_improvement(
         ).model_dump()
 
     except Exception as e:
-        improve_router.note(
+        _note(
             f"Executor: improvement {improvement_area.get('id', 'unknown')} "
             f"failed: {e}",
             tags=["improve_executor", "error"],
