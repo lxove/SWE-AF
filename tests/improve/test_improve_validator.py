@@ -223,11 +223,50 @@ class TestAgentAIInitialization:
                 config=config,
             ))
 
-            # Verify AgentAIConfig
+            # Verify AgentAIConfig (claude_code runtime maps to "claude" provider)
             config_arg = MockAgentAI.call_args[0][0]
-            assert config_arg.provider == "claude_code"
+            assert config_arg.provider == "claude"
             assert config_arg.model == "opus"
             assert config_arg.cwd == "/test/repo"
+
+    def test_agent_ai_provider_mapping_open_code(self) -> None:
+        """open_code runtime should map to 'opencode' provider."""
+        from swe_af.improve.validator import validate_improvement
+
+        improvement = {
+            "id": "test-improvement",
+            "category": "test-coverage",
+            "title": "Test",
+            "description": "Test",
+            "files": ["test.py"],
+            "found_by_run": "2024-01-01T00:00:00Z",
+        }
+        config = {
+            "runtime": "open_code",
+            "models": {"validator": "qwen/qwen-2.5-coder-32b-instruct"},
+        }
+
+        result_validator = ValidatorResult(
+            is_valid=True,
+            reason="Valid",
+            file_changes_detected=[],
+        )
+        mock_response = _make_mock_response(result_validator)
+
+        with patch("swe_af.improve.validator.AgentAI") as MockAgentAI:
+            instance = MagicMock()
+            instance.run = AsyncMock(return_value=mock_response)
+            MockAgentAI.return_value = instance
+
+            _run(validate_improvement(
+                improvement_area=improvement,
+                repo_path="/test/repo",
+                config=config,
+            ))
+
+            # Verify open_code runtime maps to "opencode" provider
+            config_arg = MockAgentAI.call_args[0][0]
+            assert config_arg.provider == "opencode"
 
     def test_agent_ai_allowed_tools_read_glob_grep_only(self) -> None:
         """AgentAI should be initialized with READ, GLOB, GREP tools only (no BASH/WRITE)."""

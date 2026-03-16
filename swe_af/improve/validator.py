@@ -84,9 +84,11 @@ async def validate_improvement(
     )
 
     # Create AgentAI with read-only tools
+    # Map runtime to provider: claude_code -> claude, open_code -> opencode
+    ai_provider = "claude" if improve_config.runtime == "claude_code" else "opencode"
     ai = AgentAI(
         AgentAIConfig(
-            provider=improve_config.runtime,
+            provider=ai_provider,
             model=validator_model,
             cwd=repo_path,
             max_turns=10,  # Validation should be quick
