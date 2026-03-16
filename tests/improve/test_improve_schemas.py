@@ -625,3 +625,407 @@ def test_improvement_area_datetime_fields():
     area2 = ImprovementArea(**data)
     assert area2.found_by_run == "2024-01-01T10:00:00Z"
     assert area2.completed_by_run == "2024-01-01T11:00:00Z"
+
+
+# ---------------------------------------------------------------------------
+# Additional Coverage Tests
+# ---------------------------------------------------------------------------
+
+
+def test_scan_result_scan_depth_used_values():
+    """Test ScanResult scan_depth_used accepts only valid enum values."""
+    valid_depths = ["quick", "normal", "thorough"]
+
+    for depth in valid_depths:
+        result = ScanResult(
+            new_areas=[],
+            scan_depth_used=depth,
+            summary="Test",
+        )
+        assert result.scan_depth_used == depth
+
+    # Invalid depth should fail
+    with pytest.raises(ValidationError):
+        ScanResult(
+            new_areas=[],
+            scan_depth_used="invalid_depth",
+            summary="Test",
+        )
+
+
+def test_improve_config_models_dict_validation():
+    """Test ImproveConfig models dict accepts valid role keys."""
+    config = ImproveConfig(
+        models={
+            "scanner": "custom-scanner",
+            "executor": "custom-executor",
+            "validator": "custom-validator",
+        }
+    )
+    assert config.models == {
+        "scanner": "custom-scanner",
+        "executor": "custom-executor",
+        "validator": "custom-validator",
+    }
+
+
+def test_run_record_budget_used_seconds_as_float():
+    """Test RunRecord budget_used_seconds is a float."""
+    record = RunRecord(
+        started_at="2024-01-01T00:00:00Z",
+        budget_used_seconds=123.456,
+    )
+    assert isinstance(record.budget_used_seconds, float)
+    assert record.budget_used_seconds == 123.456
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["pending", "in_progress", "completed", "stale", "skipped", "failed"],
+)
+def test_improvement_area_status_parametrized(status):
+    """Parametrized test for ImprovementArea status values."""
+    area = ImprovementArea(
+        id="test",
+        category="test-coverage",
+        title="Test",
+        description="Test",
+        files=["test.py"],
+        found_by_run="2024-01-01T00:00:00Z",
+        status=status,
+    )
+    assert area.status == status
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        "test-coverage",
+        "code-quality",
+        "error-handling",
+        "consistency",
+        "dead-code",
+        "performance",
+        "documentation",
+    ],
+)
+def test_improvement_area_category_parametrized(category):
+    """Parametrized test for ImprovementArea category values."""
+    area = ImprovementArea(
+        id="test",
+        category=category,
+        title="Test",
+        description="Test",
+        files=["test.py"],
+        found_by_run="2024-01-01T00:00:00Z",
+    )
+    assert area.category == category
+
+
+@pytest.mark.parametrize("scan_depth", ["quick", "normal", "thorough"])
+def test_improve_config_scan_depth_parametrized(scan_depth):
+    """Parametrized test for ImproveConfig scan_depth values."""
+    config = ImproveConfig(scan_depth=scan_depth)
+    assert config.scan_depth == scan_depth
+
+
+@pytest.mark.parametrize(
+    "stopped_reason",
+    ["budget_exhausted", "max_improvements_reached", "no_more_improvements", "error"],
+)
+def test_improve_result_stopped_reason_parametrized(stopped_reason):
+    """Parametrized test for ImproveResult stopped_reason values."""
+    record = RunRecord(started_at="2024-01-01T00:00:00Z")
+    result = ImproveResult(
+        improvements_completed=[],
+        improvements_found=[],
+        improvements_skipped=[],
+        improvements_failed=[],
+        budget_remaining_seconds=0.0,
+        stopped_reason=stopped_reason,
+        summary="Test",
+        run_record=record,
+    )
+    assert result.stopped_reason == stopped_reason
+
+
+# ---------------------------------------------------------------------------
+# JSON Serialization/Deserialization Tests
+# ---------------------------------------------------------------------------
+
+
+def test_improvement_area_json_roundtrip():
+    """Test ImprovementArea serialization and deserialization."""
+    area = ImprovementArea(
+        id="test-improvement",
+        category="test-coverage",
+        title="Add missing tests",
+        description="Add tests for user authentication",
+        files=["auth.py", "utils.py"],
+        priority=3,
+        status="in_progress",
+        found_by_run="2024-01-01T00:00:00Z",
+        completed_by_run="2024-01-01T12:00:00Z",
+        commit_sha="abc123",
+        notes="Some notes",
+    )
+
+    # Serialize
+    data = area.model_dump()
+    assert data["id"] == "test-improvement"
+    assert data["category"] == "test-coverage"
+    assert data["priority"] == 3
+    assert data["status"] == "in_progress"
+    assert data["commit_sha"] == "abc123"
+
+    # Deserialize
+    area2 = ImprovementArea(**data)
+    assert area2.id == area.id
+    assert area2.category == area.category
+    assert area2.title == area.title
+    assert area2.description == area.description
+    assert area2.files == area.files
+    assert area2.priority == area.priority
+    assert area2.status == area.status
+    assert area2.notes == area.notes
+
+
+def test_improvement_state_json_roundtrip():
+    """Test ImprovementState serialization and deserialization."""
+    area = ImprovementArea(
+        id="test",
+        category="test-coverage",
+        title="Test",
+        description="Test",
+        files=["test.py"],
+        found_by_run="2024-01-01T00:00:00Z",
+    )
+    record = RunRecord(
+        started_at="2024-01-01T00:00:00Z",
+        ended_at="2024-01-01T01:00:00Z",
+        improvements_found=5,
+        improvements_completed=3,
+    )
+    state = ImprovementState(
+        repo_path="/path/to/repo",
+        improvements=[area],
+        last_scan_at="2024-01-01T00:00:00Z",
+        runs=[record],
+    )
+
+    # Serialize
+    data = state.model_dump()
+    assert data["repo_path"] == "/path/to/repo"
+    assert len(data["improvements"]) == 1
+    assert len(data["runs"]) == 1
+
+    # Deserialize
+    state2 = ImprovementState(**data)
+    assert state2.repo_path == state.repo_path
+    assert len(state2.improvements) == 1
+    assert state2.improvements[0].id == "test"
+    assert len(state2.runs) == 1
+
+
+def test_improve_config_json_roundtrip():
+    """Test ImproveConfig serialization and deserialization."""
+    config = ImproveConfig(
+        runtime="open_code",
+        models={"default": "custom-model"},
+        max_time_seconds=7200,
+        max_improvements=20,
+        permission_mode="auto",
+        scan_depth="thorough",
+        categories=["test-coverage", "code-quality"],
+        agent_max_turns=100,
+    )
+
+    # Serialize
+    data = config.model_dump()
+    assert data["runtime"] == "open_code"
+    assert data["models"] == {"default": "custom-model"}
+    assert data["max_time_seconds"] == 7200
+
+    # Deserialize
+    config2 = ImproveConfig(**data)
+    assert config2.runtime == config.runtime
+    assert config2.models == config.models
+    assert config2.max_time_seconds == config.max_time_seconds
+    assert config2.max_improvements == config.max_improvements
+    assert config2.permission_mode == config.permission_mode
+    assert config2.scan_depth == config.scan_depth
+    assert config2.categories == config.categories
+    assert config2.agent_max_turns == config.agent_max_turns
+
+
+def test_scan_result_json_roundtrip():
+    """Test ScanResult serialization and deserialization."""
+    area = ImprovementArea(
+        id="test",
+        category="test-coverage",
+        title="Test",
+        description="Test",
+        files=["test.py"],
+        found_by_run="2024-01-01T00:00:00Z",
+    )
+    result = ScanResult(
+        new_areas=[area],
+        scan_depth_used="thorough",
+        summary="Found 1 improvement",
+        files_analyzed=42,
+    )
+
+    # Serialize
+    data = result.model_dump()
+    assert len(data["new_areas"]) == 1
+    assert data["scan_depth_used"] == "thorough"
+    assert data["files_analyzed"] == 42
+
+    # Deserialize
+    result2 = ScanResult(**data)
+    assert len(result2.new_areas) == 1
+    assert result2.new_areas[0].id == "test"
+    assert result2.scan_depth_used == result.scan_depth_used
+    assert result2.summary == result.summary
+    assert result2.files_analyzed == result.files_analyzed
+
+
+def test_validator_result_json_roundtrip():
+    """Test ValidatorResult serialization and deserialization."""
+    result = ValidatorResult(
+        is_valid=True,
+        reason="All files still exist",
+        file_changes_detected=["file1.py", "file2.py"],
+    )
+
+    # Serialize
+    data = result.model_dump()
+    assert data["is_valid"] is True
+    assert data["reason"] == "All files still exist"
+    assert data["file_changes_detected"] == ["file1.py", "file2.py"]
+
+    # Deserialize
+    result2 = ValidatorResult(**data)
+    assert result2.is_valid == result.is_valid
+    assert result2.reason == result.reason
+    assert result2.file_changes_detected == result.file_changes_detected
+
+
+def test_executor_result_json_roundtrip():
+    """Test ExecutorResult serialization and deserialization."""
+    area = ImprovementArea(
+        id="new-finding",
+        category="code-quality",
+        title="New Issue",
+        description="Found during execution",
+        files=["main.py"],
+        found_by_run="2024-01-01T00:00:00Z",
+    )
+    result = ExecutorResult(
+        success=True,
+        commit_sha="def456",
+        commit_message="Fixed the issue",
+        files_changed=["auth.py", "utils.py"],
+        new_findings=[area],
+        error="",
+        tests_passed=True,
+        verification_output="All tests passed",
+    )
+
+    # Serialize
+    data = result.model_dump()
+    assert data["success"] is True
+    assert data["commit_sha"] == "def456"
+    assert len(data["new_findings"]) == 1
+
+    # Deserialize
+    result2 = ExecutorResult(**data)
+    assert result2.success == result.success
+    assert result2.commit_sha == result.commit_sha
+    assert result2.commit_message == result.commit_message
+    assert result2.files_changed == result.files_changed
+    assert len(result2.new_findings) == 1
+    assert result2.new_findings[0].id == "new-finding"
+    assert result2.tests_passed == result.tests_passed
+    assert result2.verification_output == result.verification_output
+
+
+def test_improve_result_json_roundtrip():
+    """Test ImproveResult serialization and deserialization."""
+    area1 = ImprovementArea(
+        id="completed",
+        category="test-coverage",
+        title="Test",
+        description="Test",
+        files=["test.py"],
+        found_by_run="2024-01-01T00:00:00Z",
+    )
+    area2 = ImprovementArea(
+        id="found",
+        category="code-quality",
+        title="Test",
+        description="Test",
+        files=["main.py"],
+        found_by_run="2024-01-01T00:00:00Z",
+    )
+    record = RunRecord(
+        started_at="2024-01-01T00:00:00Z",
+        ended_at="2024-01-01T01:00:00Z",
+        improvements_found=1,
+        improvements_completed=1,
+    )
+    result = ImproveResult(
+        improvements_completed=[area1],
+        improvements_found=[area2],
+        improvements_skipped=[],
+        improvements_failed=[],
+        budget_remaining_seconds=500.5,
+        stopped_reason="budget_exhausted",
+        summary="Completed 1 improvement",
+        run_record=record,
+    )
+
+    # Serialize
+    data = result.model_dump()
+    assert len(data["improvements_completed"]) == 1
+    assert len(data["improvements_found"]) == 1
+    assert data["stopped_reason"] == "budget_exhausted"
+
+    # Deserialize
+    result2 = ImproveResult(**data)
+    assert len(result2.improvements_completed) == 1
+    assert result2.improvements_completed[0].id == "completed"
+    assert len(result2.improvements_found) == 1
+    assert result2.improvements_found[0].id == "found"
+    assert result2.budget_remaining_seconds == result.budget_remaining_seconds
+    assert result2.stopped_reason == result.stopped_reason
+    assert result2.summary == result.summary
+
+
+def test_run_record_json_roundtrip():
+    """Test RunRecord serialization and deserialization."""
+    record = RunRecord(
+        started_at="2024-01-01T00:00:00Z",
+        ended_at="2024-01-01T01:00:00Z",
+        improvements_found=10,
+        improvements_completed=8,
+        improvements_skipped=1,
+        budget_used_seconds=3456.789,
+        stopped_reason="budget_exhausted",
+    )
+
+    # Serialize
+    data = record.model_dump()
+    assert data["started_at"] == "2024-01-01T00:00:00Z"
+    assert data["improvements_found"] == 10
+    assert data["budget_used_seconds"] == 3456.789
+
+    # Deserialize
+    record2 = RunRecord(**data)
+    assert record2.started_at == record.started_at
+    assert record2.ended_at == record.ended_at
+    assert record2.improvements_found == record.improvements_found
+    assert record2.improvements_completed == record.improvements_completed
+    assert record2.improvements_skipped == record.improvements_skipped
+    assert record2.budget_used_seconds == record.budget_used_seconds
+    assert record2.stopped_reason == record.stopped_reason
