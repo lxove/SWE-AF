@@ -147,6 +147,7 @@ class ImproveResult(BaseModel):
     ]
     summary: str                           # human-readable summary
     run_record: RunRecord                  # this run's metadata
+    remote_branch: str = ""                # remote branch pushed to (if any)
     pr_url: str = ""                       # draft PR URL (if created)
 
 

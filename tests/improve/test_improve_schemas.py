@@ -426,6 +426,7 @@ def test_improve_result_required_fields():
     assert result.stopped_reason == "no_more_improvements"
     assert result.summary == "Test completed"
     assert result.run_record == record
+    assert result.remote_branch == ""
     assert result.pr_url == ""
 
 

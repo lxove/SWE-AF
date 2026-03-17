@@ -396,10 +396,14 @@ async def improve(
 
     app.note(f"Improve loop finished: {summary}", tags=["improve", "loop", "done"])
 
-    # Push & create draft PR if improvements were committed and PR creation is enabled
+    # Push branch to remote so work isn't lost in ephemeral environments
+    remote_branch = ""
     pr_url = ""
-    if completed and cfg.enable_github_pr:
-        pr_url = await _maybe_create_pr(repo_path, cfg, completed, summary)
+    if completed:
+        remote_branch = _push_branch(repo_path)
+        # Create draft PR if push succeeded and PR creation is enabled
+        if remote_branch and cfg.enable_github_pr:
+            pr_url = await _maybe_create_pr(repo_path, cfg, remote_branch, completed, summary)
 
     return ImproveResult(
         improvements_completed=completed,
@@ -410,6 +414,7 @@ async def improve(
         stopped_reason=stopped_reason,
         summary=summary,
         run_record=run_record,
+        remote_branch=remote_branch,
         pr_url=pr_url,
     ).model_dump()
 
@@ -432,29 +437,54 @@ def _git(repo_path: str, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _push_branch(repo_path: str) -> str:
+    """Push current branch to origin. Returns the branch name or empty string on failure."""
+    remote_url = _git(repo_path, "remote", "get-url", "origin")
+    if not remote_url:
+        app.note("No remote found — skipping push", tags=["improve", "push", "skip"])
+        return ""
+
+    current_branch = _git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
+    if not current_branch or current_branch == "HEAD":
+        app.note("Detached HEAD — skipping push", tags=["improve", "push", "skip"])
+        return ""
+
+    app.note(
+        f"Pushing branch {current_branch} to origin",
+        tags=["improve", "push", "start"],
+    )
+
+    result = subprocess.run(
+        ["git", "push", "-u", "origin", current_branch],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        app.note(
+            f"Push failed (non-fatal): {result.stderr.strip()}",
+            tags=["improve", "push", "error"],
+        )
+        return ""
+
+    app.note(
+        f"Pushed branch {current_branch} to origin",
+        tags=["improve", "push", "complete"],
+    )
+    return current_branch
+
+
 async def _maybe_create_pr(
     repo_path: str,
     cfg: ImproveConfig,
+    current_branch: str,
     completed: list[ImprovementArea],
     summary: str,
 ) -> str:
-    """Push current branch and create a draft PR. Returns PR URL or empty string."""
-    # Detect remote
-    remote_url = _git(repo_path, "remote", "get-url", "origin")
-    if not remote_url:
-        app.note("No remote found — skipping PR creation", tags=["improve", "pr", "skip"])
-        return ""
-
-    # Detect current branch
-    current_branch = _git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
-    if not current_branch or current_branch == "HEAD":
-        app.note("Detached HEAD — skipping PR creation", tags=["improve", "pr", "skip"])
-        return ""
-
+    """Create a draft PR for the already-pushed branch. Returns PR URL or empty string."""
     # Determine base branch for PR
     base_branch = cfg.github_pr_base
     if not base_branch:
-        # Try to get the remote default branch
         base_branch = _git(repo_path, "rev-parse", "--abbrev-ref", "origin/HEAD")
         if base_branch:
             base_branch = base_branch.removeprefix("origin/")
@@ -467,7 +497,6 @@ async def _maybe_create_pr(
     else:
         goal = f"improve: {len(completed)} improvements"
 
-    build_summary = summary
     completed_issues = [
         {"issue_name": imp.id, "result_summary": imp.title}
         for imp in completed
@@ -485,7 +514,7 @@ async def _maybe_create_pr(
             integration_branch=current_branch,
             base_branch=base_branch,
             goal=goal,
-            build_summary=build_summary,
+            build_summary=summary,
             completed_issues=completed_issues,
             accumulated_debt=[],
             artifacts_dir="",
