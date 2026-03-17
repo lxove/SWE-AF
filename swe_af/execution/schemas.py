@@ -8,6 +8,16 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr, field_validator, model_validator
 
+from swe_af.execution.repo_url import (
+    GitPlatform,
+    ParsedRepoURL,
+    derive_repo_name,
+    is_shorthand,
+    expand_shorthand,
+    normalize_repo_url,
+    parse_repo_url,
+)
+
 # Global default for all agent max_turns. Change this one value to adjust everywhere.
 DEFAULT_AGENT_MAX_TURNS: int = 150
 
@@ -20,18 +30,16 @@ DEFAULT_AGENT_MAX_TURNS: int = 150
 def _derive_repo_name(url: str) -> str:
     """Extract repo name from a git URL.
 
+    Delegates to :func:`swe_af.execution.repo_url.derive_repo_name` for
+    unified URL parsing across the codebase.
+
     Examples:
         'https://github.com/org/my-project.git' -> 'my-project'
         'git@github.com:org/repo.git'           -> 'repo'
         'https://github.com/org/repo'           -> 'repo'
+        'org/repo'                              -> 'repo'
     """
-    if not url:
-        return ""
-    # Strip trailing .git, then take last path component
-    stripped = re.sub(r"\.git$", "", url.rstrip("/"))
-    # Handle both HTTPS and SSH URLs
-    name = re.split(r"[/:]", stripped)[-1]
-    return name
+    return derive_repo_name(url)
 
 
 # ---------------------------------------------------------------------------
@@ -60,9 +68,14 @@ class RepoSpec(BaseModel):
     @field_validator("repo_url")
     @classmethod
     def _validate_repo_url(cls, v: str) -> str:
-        if v and not (v.startswith("http://") or v.startswith("https://") or v.startswith("git@")):
+        if not v:
+            return v
+        # Auto-expand owner/repo shorthand to full GitHub HTTPS URL
+        if is_shorthand(v):
+            return expand_shorthand(v)
+        if not (v.startswith("http://") or v.startswith("https://") or v.startswith("git@")):
             raise ValueError(
-                f"repo_url must be an HTTP(S) or SSH git URL, got {v!r}"
+                f"repo_url must be an HTTP(S) or SSH git URL, or owner/repo shorthand, got {v!r}"
             )
         return v
 
@@ -654,7 +667,10 @@ class BuildConfig(BaseModel):
 
         # Step 2: Synthesise from repo_url
         if repo_url and not repos:
-            self.repos = [RepoSpec(repo_url=repo_url, role="primary")]
+            spec = RepoSpec(repo_url=repo_url, role="primary")
+            self.repos = [spec]
+            # Backfill expanded URL (e.g. shorthand → full HTTPS)
+            self.repo_url = spec.repo_url
             return self
 
         # Step 3: Empty passthrough

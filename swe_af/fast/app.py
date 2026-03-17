@@ -37,9 +37,13 @@ app.include_router(_execution_router)
 
 
 def _repo_name_from_url(url: str) -> str:
-    """Extract repo name from a GitHub URL."""
-    match = re.search(r"/([^/]+?)(?:\.git)?$", url.rstrip("/"))
-    return match.group(1) if match else "repo"
+    """Extract repo name from a git URL.
+
+    Delegates to :func:`swe_af.execution.repo_url.derive_repo_name`.
+    """
+    from swe_af.execution.repo_url import derive_repo_name
+    name = derive_repo_name(url)
+    return name or "repo"
 
 
 def _runtime_to_provider(runtime: str) -> str:
