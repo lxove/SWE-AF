@@ -243,6 +243,7 @@ def test_improve_config_defaults():
     config = ImproveConfig()
     assert config.runtime == "claude_code"
     assert config.models is None
+    assert config.repo_url == ""
     assert config.max_time_seconds == 3600
     assert config.max_improvements == 10
     assert config.permission_mode == ""

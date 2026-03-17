@@ -483,6 +483,7 @@ def test_ac8_improve_config_defaults():
 
     assert config.runtime == "claude_code"
     assert config.models is None
+    assert config.repo_url == ""
     assert config.max_time_seconds == 3600
     assert config.max_improvements == 10
     assert config.permission_mode == ""
@@ -510,6 +511,132 @@ def test_ac8_improve_config_model_resolution():
     resolved = improve_resolve_models(config)
     assert resolved["scanner_model"] == "haiku"
     assert resolved["executor_model"] == "sonnet"
+
+
+# ---------------------------------------------------------------------------
+# repo_url support: repo_path is optional when repo_url is provided
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_repo_url_derives_repo_path():
+    """When repo_url is given and repo_path is empty, repo_path is auto-derived."""
+    with patch("swe_af.improve.app.app") as mock_app, \
+         patch("subprocess.run") as mock_run, \
+         patch("os.path.isdir", return_value=True), \
+         patch("os.path.exists") as mock_exists, \
+         patch("os.makedirs"):
+        mock_app.call = AsyncMock()
+        mock_app.note = MagicMock()
+
+        # .git doesn't exist yet -> triggers clone; state file doesn't exist
+        mock_exists.side_effect = lambda p: False
+
+        # Clone succeeds
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        # Scanner returns nothing so loop ends quickly
+        mock_app.call.return_value = {
+            "new_areas": [],
+            "scan_depth_used": "normal",
+            "summary": "No improvements found",
+            "files_analyzed": 0,
+        }
+
+        result = await improve(repo_url="https://github.com/org/my-repo.git", config={"max_improvements": 1})
+
+        # Verify clone was called with derived path
+        mock_run.assert_called_once()
+        clone_args = mock_run.call_args[0][0]
+        assert clone_args[0] == "git"
+        assert clone_args[1] == "clone"
+        assert "my-repo" in clone_args[3]
+
+
+@pytest.mark.asyncio
+async def test_repo_url_from_config():
+    """repo_url can be provided via config dict."""
+    with patch("swe_af.improve.app.app") as mock_app, \
+         patch("subprocess.run") as mock_run, \
+         patch("os.path.isdir", return_value=True), \
+         patch("os.path.exists", return_value=False), \
+         patch("os.makedirs"):
+        mock_app.call = AsyncMock()
+        mock_app.note = MagicMock()
+
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_app.call.return_value = {
+            "new_areas": [],
+            "scan_depth_used": "normal",
+            "summary": "No improvements found",
+            "files_analyzed": 0,
+        }
+
+        result = await improve(config={"repo_url": "https://github.com/org/project", "max_improvements": 1})
+
+        # Clone was triggered via config repo_url
+        mock_run.assert_called_once()
+        clone_args = mock_run.call_args[0][0]
+        assert "project" in clone_args[3]
+
+
+@pytest.mark.asyncio
+async def test_no_repo_path_or_url_returns_error():
+    """Calling improve() with neither repo_path nor repo_url returns an error."""
+    result = await improve()
+
+    result_obj = ImproveResult(**result)
+    assert result_obj.stopped_reason == "error"
+    assert "repo_path" in result_obj.summary or "repo_url" in result_obj.summary
+
+
+@pytest.mark.asyncio
+async def test_repo_url_clone_failure_returns_error():
+    """Clone failure returns a structured error, not an exception."""
+    with patch("swe_af.improve.app.app") as mock_app, \
+         patch("subprocess.run") as mock_run, \
+         patch("os.path.exists", return_value=False), \
+         patch("os.makedirs"):
+        mock_app.note = MagicMock()
+
+        mock_run.return_value = MagicMock(returncode=128, stderr="fatal: repo not found", stdout="")
+
+        result = await improve(repo_url="https://github.com/org/nonexistent")
+
+        result_obj = ImproveResult(**result)
+        assert result_obj.stopped_reason == "error"
+        assert "clone failed" in result_obj.summary
+
+
+@pytest.mark.asyncio
+async def test_repo_url_direct_param_overrides_config():
+    """Direct repo_url parameter takes precedence over config.repo_url."""
+    with patch("swe_af.improve.app.app") as mock_app, \
+         patch("subprocess.run") as mock_run, \
+         patch("os.path.isdir", return_value=True), \
+         patch("os.path.exists", return_value=False), \
+         patch("os.makedirs"):
+        mock_app.call = AsyncMock()
+        mock_app.note = MagicMock()
+
+        mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+        mock_app.call.return_value = {
+            "new_areas": [],
+            "scan_depth_used": "normal",
+            "summary": "No improvements found",
+            "files_analyzed": 0,
+        }
+
+        result = await improve(
+            repo_url="https://github.com/org/direct-repo",
+            config={"repo_url": "https://github.com/org/config-repo", "max_improvements": 1},
+        )
+
+        # Direct param should win
+        clone_args = mock_run.call_args[0][0]
+        assert "direct-repo" in clone_args[3]
 
 
 # ---------------------------------------------------------------------------
