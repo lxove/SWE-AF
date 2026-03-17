@@ -35,7 +35,9 @@ import pytest
 
 from swe_af.improve.app import (
     _ensure_gitignore,
+    _git,
     _load_state,
+    _maybe_create_pr,
     _pick_next_improvement,
     _save_state,
     improve,
@@ -484,6 +486,8 @@ def test_ac8_improve_config_defaults():
     assert config.runtime == "claude_code"
     assert config.models is None
     assert config.repo_url == ""
+    assert config.enable_github_pr is True
+    assert config.github_pr_base == ""
     assert config.max_time_seconds == 3600
     assert config.max_improvements == 10
     assert config.permission_mode == ""
@@ -637,6 +641,196 @@ async def test_repo_url_direct_param_overrides_config():
         # Direct param should win
         clone_args = mock_run.call_args[0][0]
         assert "direct-repo" in clone_args[3]
+
+
+# ---------------------------------------------------------------------------
+# PR creation: push + draft PR after improve loop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pr_created_after_successful_improvements(temp_repo, sample_improvement):
+    """After completing improvements, improve() should push and create a draft PR."""
+    state = ImprovementState(
+        repo_path=temp_repo,
+        improvements=[sample_improvement],
+        last_scan_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _save_state(temp_repo, state)
+
+    with patch("swe_af.improve.app.app") as mock_app, \
+         patch("swe_af.improve.app._git") as mock_git:
+        mock_app.note = MagicMock()
+
+        # Mock git helpers: remote exists, on a branch
+        def git_side_effect(repo, *args):
+            cmd = args[0] if args else ""
+            if cmd == "remote":
+                return "https://github.com/org/repo.git"
+            elif cmd == "rev-parse":
+                return "improve/my-branch"
+            return ""
+        mock_git.side_effect = git_side_effect
+
+        # First two calls: validate + execute; third: run_github_pr
+        call_count = 0
+        async def mock_call(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            call_name = args[0] if args else ""
+            if "validate" in call_name:
+                return {"is_valid": True, "reason": "Valid", "file_changes_detected": []}
+            elif "execute" in call_name:
+                return {
+                    "success": True, "commit_sha": "abc123",
+                    "commit_message": "improve: test", "files_changed": ["test.py"],
+                    "new_findings": [], "error": "", "tests_passed": True,
+                    "verification_output": "OK",
+                }
+            elif "github_pr" in call_name:
+                return {"success": True, "pr_url": "https://github.com/org/repo/pull/42", "pr_number": 42, "error_message": ""}
+            return {}
+
+        mock_app.call = AsyncMock(side_effect=mock_call)
+
+        result = await improve(repo_path=temp_repo, config={"max_improvements": 1})
+
+        result_obj = ImproveResult(**result)
+        assert result_obj.pr_url == "https://github.com/org/repo/pull/42"
+
+        # Verify run_github_pr was called
+        call_args = [str(c) for c in mock_app.call.call_args_list]
+        assert any("github_pr" in a for a in call_args), "run_github_pr should be called"
+
+
+@pytest.mark.asyncio
+async def test_pr_skipped_when_no_remote(temp_repo, sample_improvement):
+    """If repo has no remote, PR creation is skipped gracefully."""
+    state = ImprovementState(
+        repo_path=temp_repo,
+        improvements=[sample_improvement],
+        last_scan_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _save_state(temp_repo, state)
+
+    with patch("swe_af.improve.app.app") as mock_app, \
+         patch("swe_af.improve.app._git", return_value=""):
+        mock_app.note = MagicMock()
+
+        async def mock_call(*args, **kwargs):
+            call_name = args[0] if args else ""
+            if "validate" in call_name:
+                return {"is_valid": True, "reason": "Valid", "file_changes_detected": []}
+            elif "execute" in call_name:
+                return {
+                    "success": True, "commit_sha": "abc123",
+                    "commit_message": "improve: test", "files_changed": ["test.py"],
+                    "new_findings": [], "error": "", "tests_passed": True,
+                    "verification_output": "OK",
+                }
+            return {}
+
+        mock_app.call = AsyncMock(side_effect=mock_call)
+
+        result = await improve(repo_path=temp_repo, config={"max_improvements": 1})
+
+        result_obj = ImproveResult(**result)
+        assert result_obj.pr_url == ""
+
+        # run_github_pr should NOT have been called
+        call_args = [str(c) for c in mock_app.call.call_args_list]
+        assert not any("github_pr" in a for a in call_args)
+
+
+@pytest.mark.asyncio
+async def test_pr_skipped_when_disabled(temp_repo, sample_improvement):
+    """PR creation is skipped when enable_github_pr=False."""
+    state = ImprovementState(
+        repo_path=temp_repo,
+        improvements=[sample_improvement],
+        last_scan_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _save_state(temp_repo, state)
+
+    with patch("swe_af.improve.app.app") as mock_app, \
+         patch("swe_af.improve.app._git") as mock_git:
+        mock_app.note = MagicMock()
+        mock_git.return_value = "https://github.com/org/repo.git"
+
+        async def mock_call(*args, **kwargs):
+            call_name = args[0] if args else ""
+            if "validate" in call_name:
+                return {"is_valid": True, "reason": "Valid", "file_changes_detected": []}
+            elif "execute" in call_name:
+                return {
+                    "success": True, "commit_sha": "abc123",
+                    "commit_message": "improve: test", "files_changed": ["test.py"],
+                    "new_findings": [], "error": "", "tests_passed": True,
+                    "verification_output": "OK",
+                }
+            return {}
+
+        mock_app.call = AsyncMock(side_effect=mock_call)
+
+        result = await improve(
+            repo_path=temp_repo,
+            config={"max_improvements": 1, "enable_github_pr": False},
+        )
+
+        result_obj = ImproveResult(**result)
+        assert result_obj.pr_url == ""
+
+        # run_github_pr should NOT have been called
+        call_args = [str(c) for c in mock_app.call.call_args_list]
+        assert not any("github_pr" in a for a in call_args)
+
+
+@pytest.mark.asyncio
+async def test_pr_failure_is_non_fatal(temp_repo, sample_improvement):
+    """If PR creation fails, the result still returns successfully with empty pr_url."""
+    state = ImprovementState(
+        repo_path=temp_repo,
+        improvements=[sample_improvement],
+        last_scan_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _save_state(temp_repo, state)
+
+    with patch("swe_af.improve.app.app") as mock_app, \
+         patch("swe_af.improve.app._git") as mock_git:
+        mock_app.note = MagicMock()
+
+        def git_side_effect(repo, *args):
+            cmd = args[0] if args else ""
+            if cmd == "remote":
+                return "https://github.com/org/repo.git"
+            elif cmd == "rev-parse":
+                return "my-branch"
+            return ""
+        mock_git.side_effect = git_side_effect
+
+        async def mock_call(*args, **kwargs):
+            call_name = args[0] if args else ""
+            if "validate" in call_name:
+                return {"is_valid": True, "reason": "Valid", "file_changes_detected": []}
+            elif "execute" in call_name:
+                return {
+                    "success": True, "commit_sha": "abc123",
+                    "commit_message": "improve: test", "files_changed": ["test.py"],
+                    "new_findings": [], "error": "", "tests_passed": True,
+                    "verification_output": "OK",
+                }
+            elif "github_pr" in call_name:
+                raise RuntimeError("GitHub API down")
+            return {}
+
+        mock_app.call = AsyncMock(side_effect=mock_call)
+
+        result = await improve(repo_path=temp_repo, config={"max_improvements": 1})
+
+        # Should still succeed — PR failure is non-fatal
+        result_obj = ImproveResult(**result)
+        assert result_obj.pr_url == ""
+        assert len(result_obj.improvements_completed) == 1
 
 
 # ---------------------------------------------------------------------------

@@ -83,6 +83,8 @@ class ImproveConfig(BaseModel):
     runtime: Literal["claude_code", "open_code"] = "claude_code"
     models: dict[str, str] | None = None  # keys: "default", "scanner", "executor", "validator"
     repo_url: str = ""                    # git URL; used to clone if repo_path is empty
+    enable_github_pr: bool = True         # push branch + create draft PR after loop
+    github_pr_base: str = ""              # target branch for PR (default: remote default or "main")
     max_time_seconds: int = 3600          # overall budget (default 1 hour)
     max_improvements: int = 10            # max improvements to complete (0 = unlimited)
     permission_mode: str = ""             # forwarded to agents
@@ -145,6 +147,7 @@ class ImproveResult(BaseModel):
     ]
     summary: str                           # human-readable summary
     run_record: RunRecord                  # this run's metadata
+    pr_url: str = ""                       # draft PR URL (if created)
 
 
 # ---------------------------------------------------------------------------

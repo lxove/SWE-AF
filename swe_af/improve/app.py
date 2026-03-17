@@ -40,6 +40,11 @@ app = Agent(
 
 app.include_router(improve_router)
 
+# Include the planner's execution router so that router.note() calls inside
+# execution_agents.run_github_pr work when delegated to via the thin wrapper.
+from swe_af.reasoners import router as _execution_router  # noqa: E402
+app.include_router(_execution_router)
+
 
 # ---------------------------------------------------------------------------
 # State persistence
@@ -391,6 +396,11 @@ async def improve(
 
     app.note(f"Improve loop finished: {summary}", tags=["improve", "loop", "done"])
 
+    # Push & create draft PR if improvements were committed and PR creation is enabled
+    pr_url = ""
+    if completed and cfg.enable_github_pr:
+        pr_url = await _maybe_create_pr(repo_path, cfg, completed, summary)
+
     return ImproveResult(
         improvements_completed=completed,
         improvements_found=found,
@@ -400,7 +410,97 @@ async def improve(
         stopped_reason=stopped_reason,
         summary=summary,
         run_record=run_record,
+        pr_url=pr_url,
     ).model_dump()
+
+
+# ---------------------------------------------------------------------------
+# Push & PR creation
+# ---------------------------------------------------------------------------
+
+
+def _git(repo_path: str, *args: str) -> str:
+    """Run a git command and return stdout, or empty string on failure."""
+    result = subprocess.run(
+        ["git", *args],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+async def _maybe_create_pr(
+    repo_path: str,
+    cfg: ImproveConfig,
+    completed: list[ImprovementArea],
+    summary: str,
+) -> str:
+    """Push current branch and create a draft PR. Returns PR URL or empty string."""
+    # Detect remote
+    remote_url = _git(repo_path, "remote", "get-url", "origin")
+    if not remote_url:
+        app.note("No remote found — skipping PR creation", tags=["improve", "pr", "skip"])
+        return ""
+
+    # Detect current branch
+    current_branch = _git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
+    if not current_branch or current_branch == "HEAD":
+        app.note("Detached HEAD — skipping PR creation", tags=["improve", "pr", "skip"])
+        return ""
+
+    # Determine base branch for PR
+    base_branch = cfg.github_pr_base
+    if not base_branch:
+        # Try to get the remote default branch
+        base_branch = _git(repo_path, "rev-parse", "--abbrev-ref", "origin/HEAD")
+        if base_branch:
+            base_branch = base_branch.removeprefix("origin/")
+        else:
+            base_branch = "main"
+
+    # Build a goal string from completed improvements
+    if len(completed) == 1:
+        goal = f"improve: {completed[0].title}"
+    else:
+        goal = f"improve: {len(completed)} improvements"
+
+    build_summary = summary
+    completed_issues = [
+        {"issue_name": imp.id, "result_summary": imp.title}
+        for imp in completed
+    ]
+
+    app.note(
+        f"Creating draft PR: {current_branch} → {base_branch}",
+        tags=["improve", "pr", "start"],
+    )
+
+    try:
+        raw_pr = await app.call(
+            f"{NODE_ID}.run_github_pr",
+            repo_path=repo_path,
+            integration_branch=current_branch,
+            base_branch=base_branch,
+            goal=goal,
+            build_summary=build_summary,
+            completed_issues=completed_issues,
+            accumulated_debt=[],
+            artifacts_dir="",
+            model="sonnet",
+            permission_mode=cfg.permission_mode,
+            ai_provider="claude" if cfg.runtime == "claude_code" else "opencode",
+        )
+        pr_result = _unwrap(raw_pr, "run_github_pr")
+        pr_url = pr_result.get("pr_url", "")
+        if pr_url:
+            app.note(f"Draft PR created: {pr_url}", tags=["improve", "pr", "complete"])
+        return pr_url
+    except Exception as e:
+        app.note(f"PR creation failed (non-fatal): {e}", tags=["improve", "pr", "error"])
+        return ""
 
 
 # ---------------------------------------------------------------------------

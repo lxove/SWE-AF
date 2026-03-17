@@ -244,6 +244,8 @@ def test_improve_config_defaults():
     assert config.runtime == "claude_code"
     assert config.models is None
     assert config.repo_url == ""
+    assert config.enable_github_pr is True
+    assert config.github_pr_base == ""
     assert config.max_time_seconds == 3600
     assert config.max_improvements == 10
     assert config.permission_mode == ""
@@ -424,6 +426,7 @@ def test_improve_result_required_fields():
     assert result.stopped_reason == "no_more_improvements"
     assert result.summary == "Test completed"
     assert result.run_record == record
+    assert result.pr_url == ""
 
 
 def test_improve_result_stopped_reason_values():
