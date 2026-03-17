@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from datetime import datetime, timezone
 from agentfield import Agent
 
 from swe_af.execution.envelope import unwrap_call_result as _unwrap
+from swe_af.execution.schemas import _derive_repo_name as _repo_name_from_url
 from swe_af.improve import improve_router
 from swe_af.improve.schemas import (
     ImproveConfig,
@@ -129,7 +131,8 @@ def _within_budget(start_time: float, cfg: ImproveConfig) -> bool:
 
 @app.reasoner()
 async def improve(
-    repo_path: str,
+    repo_path: str = "",
+    repo_url: str = "",
     config: dict | None = None,
 ) -> dict:
     """Continuous recursive improvement loop.
@@ -147,7 +150,8 @@ async def improve(
     10. Loop until budget exhausted
 
     Args:
-        repo_path: Absolute path to the repository.
+        repo_path: Absolute path to the repository (optional if repo_url given).
+        repo_url: Git URL to clone if repo_path is empty.
         config: ImproveConfig as dict.
 
     Returns:
@@ -155,8 +159,57 @@ async def improve(
     """
     cfg = ImproveConfig(**(config or {}))
 
-    # Validate repo_path
-    if not repo_path or not os.path.isdir(repo_path):
+    # Allow repo_url from direct parameter (overrides config)
+    effective_repo_url = repo_url or cfg.repo_url
+
+    # Auto-derive repo_path from repo_url when not specified
+    if effective_repo_url and not repo_path:
+        repo_path = f"/workspaces/{_repo_name_from_url(effective_repo_url)}"
+
+    # Validate that we have a repo_path
+    if not repo_path:
+        return ImproveResult(
+            improvements_completed=[],
+            improvements_found=[],
+            improvements_skipped=[],
+            improvements_failed=[],
+            budget_remaining_seconds=cfg.max_time_seconds,
+            stopped_reason="error",
+            summary="Either repo_path or repo_url must be provided",
+            run_record=RunRecord(
+                started_at=datetime.now(timezone.utc).isoformat(),
+                stopped_reason="error",
+            ),
+        ).model_dump()
+
+    # Clone if repo_url is set and target doesn't exist yet
+    git_dir = os.path.join(repo_path, ".git")
+    if effective_repo_url and not os.path.exists(git_dir):
+        app.note(f"Cloning {effective_repo_url} → {repo_path}", tags=["improve", "clone"])
+        os.makedirs(repo_path, exist_ok=True)
+        clone_result = subprocess.run(
+            ["git", "clone", effective_repo_url, repo_path],
+            capture_output=True,
+            text=True,
+        )
+        if clone_result.returncode != 0:
+            err = clone_result.stderr.strip()
+            return ImproveResult(
+                improvements_completed=[],
+                improvements_found=[],
+                improvements_skipped=[],
+                improvements_failed=[],
+                budget_remaining_seconds=cfg.max_time_seconds,
+                stopped_reason="error",
+                summary=f"git clone failed (exit {clone_result.returncode}): {err}",
+                run_record=RunRecord(
+                    started_at=datetime.now(timezone.utc).isoformat(),
+                    stopped_reason="error",
+                ),
+            ).model_dump()
+
+    # Validate repo_path exists
+    if not os.path.isdir(repo_path):
         return ImproveResult(
             improvements_completed=[],
             improvements_found=[],
