@@ -52,6 +52,30 @@ services:
     depends_on:
       - control-plane
 
+  swe-improve:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "swe_af.improve"]
+    environment:
+      - AGENTFIELD_SERVER=http://control-plane:8080
+      - NODE_ID=swe-improve
+      - PORT=8005
+      - AGENT_CALLBACK_URL=http://swe-improve:8005
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
+      - GH_TOKEN=${GH_TOKEN}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - OPENCODE_MODEL=${OPENCODE_MODEL:-}
+    ports:
+      - "8005:8005"
+    volumes:
+      - workspaces:/workspaces
+    depends_on:
+      - control-plane
+
 volumes:
   agentfield-data:
   workspaces:
