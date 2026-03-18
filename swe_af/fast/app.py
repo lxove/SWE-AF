@@ -14,6 +14,7 @@ import re
 
 from agentfield import Agent
 from swe_af.execution.envelope import unwrap_call_result as _unwrap
+from swe_af.execution.git_utils import detect_remote_default_branch
 from swe_af.fast import fast_router
 from swe_af.fast.schemas import FastBuildConfig, FastBuildResult, fast_resolve_models
 
@@ -37,9 +38,13 @@ app.include_router(_execution_router)
 
 
 def _repo_name_from_url(url: str) -> str:
-    """Extract repo name from a GitHub URL."""
-    match = re.search(r"/([^/]+?)(?:\.git)?$", url.rstrip("/"))
-    return match.group(1) if match else "repo"
+    """Extract repo name from a git URL.
+
+    Delegates to :func:`swe_af.execution.repo_url.derive_repo_name`.
+    """
+    from swe_af.execution.repo_url import derive_repo_name
+    name = derive_repo_name(url)
+    return name or "repo"
 
 
 def _runtime_to_provider(runtime: str) -> str:
@@ -239,6 +244,7 @@ async def build(
         base_branch = (
             cfg.github_pr_base
             or (git_config.get("remote_default_branch") if git_config else "")
+            or detect_remote_default_branch(repo_path)
             or "main"
         )
         completed_count = execution_result.get("completed_count", 0)

@@ -19,6 +19,7 @@ from swe_af.reasoners.schemas import PlanResult, ReviewResult
 
 from agentfield import Agent
 from swe_af.execution.envelope import unwrap_call_result as _unwrap
+from swe_af.execution.git_utils import detect_remote_default_branch
 from swe_af.execution.schemas import (
     BuildConfig,
     BuildResult,
@@ -209,11 +210,17 @@ async def build(
 
     # Clone if repo_url is set and target doesn't exist yet
     git_dir = os.path.join(repo_path, ".git")
+    # Resolve the user-specified branch from the primary RepoSpec (if any)
+    _primary_spec = next((r for r in cfg.repos if r.role == "primary"), None) if cfg.repos else None
+    _spec_branch = _primary_spec.branch if _primary_spec else ""
     if cfg.repo_url and not os.path.exists(git_dir):
         app.note(f"Cloning {cfg.repo_url} → {repo_path}", tags=["build", "clone"])
         os.makedirs(repo_path, exist_ok=True)
+        clone_cmd = ["git", "clone", cfg.repo_url, repo_path]
+        if _spec_branch:
+            clone_cmd = ["git", "clone", "--branch", _spec_branch, cfg.repo_url, repo_path]
         clone_result = subprocess.run(
-            ["git", "clone", cfg.repo_url, repo_path],
+            clone_cmd,
             capture_output=True,
             text=True,
         )
@@ -224,7 +231,7 @@ async def build(
     elif cfg.repo_url and os.path.exists(git_dir):
         # Repo already cloned by a prior build — reset to remote default branch
         # so git_init creates the integration branch from a clean baseline.
-        default_branch = cfg.github_pr_base or "main"
+        default_branch = _spec_branch or cfg.github_pr_base or detect_remote_default_branch(repo_path) or "main"
         app.note(
             f"Repo already exists at {repo_path} — resetting to origin/{default_branch}",
             tags=["build", "clone", "reset"],
@@ -266,8 +273,11 @@ async def build(
             import shutil
             shutil.rmtree(repo_path, ignore_errors=True)
             os.makedirs(repo_path, exist_ok=True)
+            reclone_cmd = ["git", "clone", cfg.repo_url, repo_path]
+            if _spec_branch:
+                reclone_cmd = ["git", "clone", "--branch", _spec_branch, cfg.repo_url, repo_path]
             clone_result = subprocess.run(
-                ["git", "clone", cfg.repo_url, repo_path],
+                reclone_cmd,
                 capture_output=True, text=True,
             )
             if clone_result.returncode != 0:
@@ -637,6 +647,7 @@ async def build(
             repo_base_branch = (
                 cfg.github_pr_base
                 or repo_git_init.get("remote_default_branch", "")
+                or detect_remote_default_branch(ws_repo.absolute_path)
                 or "main"
             )
             try:
@@ -689,6 +700,7 @@ async def build(
             base_branch = (
                 cfg.github_pr_base
                 or (git_config.get("remote_default_branch") if git_config else "")
+                or detect_remote_default_branch(repo_path)
                 or "main"
             )
             pr_url = ""
@@ -1085,7 +1097,7 @@ async def resume_build(
 
 def main():
     """Entry point for ``python -m swe_af`` and the ``swe-af`` console script."""
-    app.run(port=8003, host="0.0.0.0")
+    app.run(port=int(os.getenv("PORT", "8003")), host="0.0.0.0")
 
 
 if __name__ == "__main__":

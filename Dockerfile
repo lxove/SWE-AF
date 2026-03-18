@@ -49,9 +49,10 @@ EXPOSE 8003
 
 ENV PORT=8003 \
     AGENTFIELD_SERVER=http://control-plane:8080 \
-    NODE_ID=swe-planner
+    NODE_ID=swe-planner \
+    PYTHON_MODULE=swe_af
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
-CMD ["python", "-m", "swe_af"]
+CMD ["sh", "-c", "python -m ${PYTHON_MODULE}"]

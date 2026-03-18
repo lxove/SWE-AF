@@ -37,6 +37,9 @@ Thumbs.db
 # Root runtime artifacts for this node (example artifacts are versioned separately)
 /.artifacts/
 
+# SWE-AF improvement state
+.swe-af/
+
 # Claude Code
 .claude/
 
