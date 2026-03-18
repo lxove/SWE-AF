@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from agentfield import Agent
 
 from swe_af.execution.envelope import unwrap_call_result as _unwrap
+from swe_af.execution.git_utils import detect_remote_default_branch
 from swe_af.execution.schemas import _derive_repo_name as _repo_name_from_url
 from swe_af.improve import improve_router
 from swe_af.improve.metrics_util import UsageAccumulator
@@ -142,7 +143,7 @@ def _setup_work_branch(repo_path: str, cfg: ImproveConfig) -> str | None:
     Returns the work branch name on success, or ``None`` on failure (with a
     note logged via ``app.note``).
     """
-    base = cfg.branch or "main"
+    base = cfg.branch or detect_remote_default_branch(repo_path) or "main"
 
     # Verify base branch exists
     check = subprocess.run(
@@ -596,7 +597,7 @@ async def _maybe_create_pr(
 ) -> str:
     """Create a draft PR for the already-pushed branch. Returns PR URL or empty string."""
     # Determine base branch for PR — defaults to cfg.branch (the base we branched from)
-    base_branch = cfg.github_pr_base or cfg.branch or "main"
+    base_branch = cfg.github_pr_base or cfg.branch or detect_remote_default_branch(repo_path) or "main"
 
     # Build a goal string from completed improvements
     if len(completed) == 1:

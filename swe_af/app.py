@@ -19,6 +19,7 @@ from swe_af.reasoners.schemas import PlanResult, ReviewResult
 
 from agentfield import Agent
 from swe_af.execution.envelope import unwrap_call_result as _unwrap
+from swe_af.execution.git_utils import detect_remote_default_branch
 from swe_af.execution.schemas import (
     BuildConfig,
     BuildResult,
@@ -224,7 +225,7 @@ async def build(
     elif cfg.repo_url and os.path.exists(git_dir):
         # Repo already cloned by a prior build — reset to remote default branch
         # so git_init creates the integration branch from a clean baseline.
-        default_branch = cfg.github_pr_base or "main"
+        default_branch = cfg.github_pr_base or detect_remote_default_branch(repo_path) or "main"
         app.note(
             f"Repo already exists at {repo_path} — resetting to origin/{default_branch}",
             tags=["build", "clone", "reset"],
@@ -637,6 +638,7 @@ async def build(
             repo_base_branch = (
                 cfg.github_pr_base
                 or repo_git_init.get("remote_default_branch", "")
+                or detect_remote_default_branch(ws_repo.absolute_path)
                 or "main"
             )
             try:
@@ -689,6 +691,7 @@ async def build(
             base_branch = (
                 cfg.github_pr_base
                 or (git_config.get("remote_default_branch") if git_config else "")
+                or detect_remote_default_branch(repo_path)
                 or "main"
             )
             pr_url = ""

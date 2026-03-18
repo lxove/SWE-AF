@@ -107,7 +107,7 @@ class ImproveConfig(BaseModel):
     runtime: Literal["claude_code", "open_code"] = "claude_code"
     models: dict[str, str] | None = None  # keys: "default", "scanner", "executor", "validator"
     repo_url: str = ""                    # git URL; used to clone if repo_path is empty
-    branch: str = "main"                  # base branch to start from; fail early if not found
+    branch: str = ""                      # base branch to start from (empty = detect from remote)
     enable_github_pr: bool = True         # create draft PR after loop (branch already pushed)
     github_pr_base: str = ""              # target branch for PR (defaults to `branch`)
     max_time_seconds: int = 3600          # overall budget (default 1 hour)
