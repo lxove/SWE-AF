@@ -52,14 +52,15 @@ def test_reasoners_registered_after_import():
     assert hasattr(improve_router, "reasoners")
     assert isinstance(improve_router.reasoners, list)
 
-    # Verify that three reasoners are registered (scanner, validator, executor)
-    assert len(improve_router.reasoners) == 3
+    # Verify that four reasoners are registered (scanner, validator, executor, run_github_pr)
+    assert len(improve_router.reasoners) == 4
 
     # Verify the reasoner function names
     reasoner_names = {r["func"].__name__ for r in improve_router.reasoners}
     assert "scan_for_improvements" in reasoner_names
     assert "validate_improvement" in reasoner_names
     assert "execute_improvement" in reasoner_names
+    assert "run_github_pr" in reasoner_names
 
 
 def test_module_can_be_imported_multiple_times():

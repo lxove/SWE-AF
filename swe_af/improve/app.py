@@ -43,11 +43,6 @@ app = Agent(
 
 app.include_router(improve_router)
 
-# Include the planner's execution router so that router.note() calls inside
-# execution_agents.run_github_pr work when delegated to via the thin wrapper.
-from swe_af.reasoners import router as _execution_router  # noqa: E402
-app.include_router(_execution_router)
-
 
 # ---------------------------------------------------------------------------
 # State persistence
@@ -275,8 +270,12 @@ async def improve(
     if effective_repo_url and not os.path.exists(git_dir):
         app.note(f"Cloning {effective_repo_url} → {repo_path}", tags=["improve", "clone"])
         os.makedirs(repo_path, exist_ok=True)
+        clone_cmd = ["git", "clone", effective_repo_url, repo_path]
+        clone_branch = cfg.branch or ""
+        if clone_branch:
+            clone_cmd += ["--branch", clone_branch]
         clone_result = subprocess.run(
-            ["git", "clone", effective_repo_url, repo_path],
+            clone_cmd,
             capture_output=True,
             text=True,
         )
