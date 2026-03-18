@@ -84,12 +84,14 @@ class UsageAccumulator:
             return ""
         parts = []
         for m in s.by_model:
+            detail = f"${m.cost_usd:.4f}, " if m.cost_usd > 0 else ""
             parts.append(
                 f"{m.model}: {m.input_tokens:,}in/{m.output_tokens:,}out "
-                f"(${m.cost_usd:.4f}, {m.num_calls} calls)"
+                f"({detail}{m.num_calls} calls)"
             )
+        cost_part = f", ${s.total_cost_usd:.4f}" if s.total_cost_usd > 0 else ""
         total = (
-            f"Total: {s.total_input_tokens:,}in/{s.total_output_tokens:,}out, "
-            f"${s.total_cost_usd:.4f}"
+            f"Total: {s.total_input_tokens:,}in/{s.total_output_tokens:,}out"
+            f"{cost_part}"
         )
         return " | ".join(parts) + f" | {total}"
