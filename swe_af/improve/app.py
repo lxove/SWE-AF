@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import string
 import subprocess
 import tempfile
 import time
@@ -134,6 +136,86 @@ def _within_budget(start_time: float, cfg: ImproveConfig) -> bool:
     return time.time() - start_time < cfg.max_time_seconds
 
 
+def _setup_work_branch(repo_path: str, cfg: ImproveConfig) -> str | None:
+    """Create a work branch from the configured base branch and push it to origin.
+
+    1. Verify ``cfg.branch`` exists locally — fail early if not.
+    2. Create ``improve/<YYYYMMDD>_<random6>`` from it.
+    3. Push the (empty) branch to origin immediately so the remote tracks it.
+
+    Returns the work branch name on success, or ``None`` on failure (with a
+    note logged via ``app.note``).
+    """
+    base = cfg.branch or "main"
+
+    # Verify base branch exists
+    check = subprocess.run(
+        ["git", "rev-parse", "--verify", base],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if check.returncode != 0:
+        # Maybe it exists as origin/<base> but not locally — try to create it
+        fetch = subprocess.run(
+            ["git", "fetch", "origin", base],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+        )
+        if fetch.returncode != 0:
+            app.note(
+                f"Base branch '{base}' not found locally or on remote",
+                tags=["improve", "branch", "error"],
+            )
+            return None
+
+    # Generate work branch name: improve/<YYYYMMDD>_<random6>
+    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    work_branch = f"improve/{date_str}_{suffix}"
+
+    # Create and switch to work branch
+    result = subprocess.run(
+        ["git", "checkout", "-b", work_branch, base],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        app.note(
+            f"Failed to create work branch '{work_branch}': {result.stderr.strip()}",
+            tags=["improve", "branch", "error"],
+        )
+        return None
+
+    app.note(
+        f"Created work branch {work_branch} from {base}",
+        tags=["improve", "branch", "create"],
+    )
+
+    # Push the empty branch to origin immediately
+    push = subprocess.run(
+        ["git", "push", "-u", "origin", work_branch],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    if push.returncode != 0:
+        app.note(
+            f"Failed to push empty work branch (non-fatal): {push.stderr.strip()}",
+            tags=["improve", "branch", "push-error"],
+        )
+        # Non-fatal — we'll try again after commits
+    else:
+        app.note(
+            f"Pushed empty work branch {work_branch} to origin",
+            tags=["improve", "branch", "push"],
+        )
+
+    return work_branch
+
+
 @app.reasoner()
 async def improve(
     repo_path: str = "",
@@ -232,6 +314,23 @@ async def improve(
     # Ensure .gitignore excludes .swe-af/
     _ensure_gitignore(repo_path)
 
+    # Create work branch from the configured base branch
+    work_branch = _setup_work_branch(repo_path, cfg)
+    if work_branch is None:
+        return ImproveResult(
+            improvements_completed=[],
+            improvements_found=[],
+            improvements_skipped=[],
+            improvements_failed=[],
+            budget_remaining_seconds=cfg.max_time_seconds,
+            stopped_reason="error",
+            summary=f"Base branch '{cfg.branch}' not found",
+            run_record=RunRecord(
+                started_at=datetime.now(timezone.utc).isoformat(),
+                stopped_reason="error",
+            ),
+        ).model_dump()
+
     # Initialize run tracking
     start_time = time.time()
     run_started = datetime.now(timezone.utc).isoformat()
@@ -241,7 +340,7 @@ async def improve(
     failed: list[ImprovementArea] = []
 
     app.note(
-        f"Improve loop starting: repo={repo_path}, max_time={cfg.max_time_seconds}s",
+        f"Improve loop starting: repo={repo_path}, branch={work_branch}, max_time={cfg.max_time_seconds}s",
         tags=["improve", "loop", "start"],
     )
 
@@ -351,6 +450,9 @@ async def improve(
                 f"Completed: {improvement.id} -> {improvement.commit_sha}",
                 tags=["improve", "complete"],
             )
+
+            # Push immediately after each commit so work is never stuck locally
+            _push_branch(repo_path)
         else:
             # Mark failed
             improvement.status = "failed"
@@ -396,14 +498,13 @@ async def improve(
 
     app.note(f"Improve loop finished: {summary}", tags=["improve", "loop", "done"])
 
-    # Push branch to remote so work isn't lost in ephemeral environments
-    remote_branch = ""
+    # Branch was already pushed after each commit; do a final push for safety
     pr_url = ""
     if completed:
-        remote_branch = _push_branch(repo_path)
-        # Create draft PR if push succeeded and PR creation is enabled
-        if remote_branch and cfg.enable_github_pr:
-            pr_url = await _maybe_create_pr(repo_path, cfg, remote_branch, completed, summary)
+        _push_branch(repo_path)
+        # Create draft PR on the already-pushed branch
+        if cfg.enable_github_pr:
+            pr_url = await _maybe_create_pr(repo_path, cfg, work_branch, completed, summary)
 
     return ImproveResult(
         improvements_completed=completed,
@@ -414,7 +515,7 @@ async def improve(
         stopped_reason=stopped_reason,
         summary=summary,
         run_record=run_record,
-        remote_branch=remote_branch,
+        remote_branch=work_branch,
         pr_url=pr_url,
     ).model_dump()
 
@@ -482,14 +583,8 @@ async def _maybe_create_pr(
     summary: str,
 ) -> str:
     """Create a draft PR for the already-pushed branch. Returns PR URL or empty string."""
-    # Determine base branch for PR
-    base_branch = cfg.github_pr_base
-    if not base_branch:
-        base_branch = _git(repo_path, "rev-parse", "--abbrev-ref", "origin/HEAD")
-        if base_branch:
-            base_branch = base_branch.removeprefix("origin/")
-        else:
-            base_branch = "main"
+    # Determine base branch for PR — defaults to cfg.branch (the base we branched from)
+    base_branch = cfg.github_pr_base or cfg.branch or "main"
 
     # Build a goal string from completed improvements
     if len(completed) == 1:

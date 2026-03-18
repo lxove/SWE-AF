@@ -61,6 +61,10 @@ from swe_af.improve.schemas import (
 # ---------------------------------------------------------------------------
 
 
+# Module path for patching
+_APP_MOD = "swe_af.improve.app"
+
+
 @pytest.fixture
 def temp_repo(tmp_path):
     """Create a temporary repository directory."""
@@ -69,6 +73,16 @@ def temp_repo(tmp_path):
     # Create a minimal git repo structure for commit tests
     (repo_path / ".git").mkdir()
     return str(repo_path)
+
+
+@pytest.fixture(autouse=True)
+def _mock_git_branch_ops():
+    """Mock _setup_work_branch and _push_branch for all integration tests."""
+    with (
+        patch(f"{_APP_MOD}._setup_work_branch", return_value="improve/20260318_abc123"),
+        patch(f"{_APP_MOD}._push_branch", return_value="improve/20260318_abc123"),
+    ):
+        yield
 
 
 @pytest.fixture
@@ -487,6 +501,7 @@ def test_ac8_improve_config_defaults():
     assert config.runtime == "claude_code"
     assert config.models is None
     assert config.repo_url == ""
+    assert config.branch == "main"
     assert config.enable_github_pr is True
     assert config.github_pr_base == ""
     assert config.max_time_seconds == 3600
@@ -526,11 +541,16 @@ def test_ac8_improve_config_model_resolution():
 @pytest.mark.asyncio
 async def test_repo_url_derives_repo_path():
     """When repo_url is given and repo_path is empty, repo_path is auto-derived."""
+    empty_state = ImprovementState(repo_path="/workspaces/my-repo")
+
     with patch("swe_af.improve.app.app") as mock_app, \
-         patch("subprocess.run") as mock_run, \
+         patch("swe_af.improve.app.subprocess.run") as mock_run, \
          patch("os.path.isdir", return_value=True), \
          patch("os.path.exists") as mock_exists, \
-         patch("os.makedirs"):
+         patch("os.makedirs"), \
+         patch(f"{_APP_MOD}._ensure_gitignore"), \
+         patch(f"{_APP_MOD}._load_state", return_value=empty_state), \
+         patch(f"{_APP_MOD}._save_state"):
         mock_app.call = AsyncMock()
         mock_app.note = MagicMock()
 
@@ -551,8 +571,9 @@ async def test_repo_url_derives_repo_path():
         result = await improve(repo_url="https://github.com/org/my-repo.git", config={"max_improvements": 1})
 
         # Verify clone was called with derived path
-        mock_run.assert_called_once()
-        clone_args = mock_run.call_args[0][0]
+        assert mock_run.called
+        clone_call = mock_run.call_args_list[0]
+        clone_args = clone_call[0][0]
         assert clone_args[0] == "git"
         assert clone_args[1] == "clone"
         assert "my-repo" in clone_args[3]
@@ -561,11 +582,16 @@ async def test_repo_url_derives_repo_path():
 @pytest.mark.asyncio
 async def test_repo_url_from_config():
     """repo_url can be provided via config dict."""
+    empty_state = ImprovementState(repo_path="/workspaces/project")
+
     with patch("swe_af.improve.app.app") as mock_app, \
-         patch("subprocess.run") as mock_run, \
+         patch("swe_af.improve.app.subprocess.run") as mock_run, \
          patch("os.path.isdir", return_value=True), \
          patch("os.path.exists", return_value=False), \
-         patch("os.makedirs"):
+         patch("os.makedirs"), \
+         patch(f"{_APP_MOD}._ensure_gitignore"), \
+         patch(f"{_APP_MOD}._load_state", return_value=empty_state), \
+         patch(f"{_APP_MOD}._save_state"):
         mock_app.call = AsyncMock()
         mock_app.note = MagicMock()
 
@@ -581,8 +607,9 @@ async def test_repo_url_from_config():
         result = await improve(config={"repo_url": "https://github.com/org/project", "max_improvements": 1})
 
         # Clone was triggered via config repo_url
-        mock_run.assert_called_once()
-        clone_args = mock_run.call_args[0][0]
+        assert mock_run.called
+        clone_call = mock_run.call_args_list[0]
+        clone_args = clone_call[0][0]
         assert "project" in clone_args[3]
 
 
@@ -600,7 +627,7 @@ async def test_no_repo_path_or_url_returns_error():
 async def test_repo_url_clone_failure_returns_error():
     """Clone failure returns a structured error, not an exception."""
     with patch("swe_af.improve.app.app") as mock_app, \
-         patch("subprocess.run") as mock_run, \
+         patch("swe_af.improve.app.subprocess.run") as mock_run, \
          patch("os.path.exists", return_value=False), \
          patch("os.makedirs"):
         mock_app.note = MagicMock()
@@ -617,11 +644,16 @@ async def test_repo_url_clone_failure_returns_error():
 @pytest.mark.asyncio
 async def test_repo_url_direct_param_overrides_config():
     """Direct repo_url parameter takes precedence over config.repo_url."""
+    empty_state = ImprovementState(repo_path="/workspaces/direct-repo")
+
     with patch("swe_af.improve.app.app") as mock_app, \
-         patch("subprocess.run") as mock_run, \
+         patch("swe_af.improve.app.subprocess.run") as mock_run, \
          patch("os.path.isdir", return_value=True), \
          patch("os.path.exists", return_value=False), \
-         patch("os.makedirs"):
+         patch("os.makedirs"), \
+         patch(f"{_APP_MOD}._ensure_gitignore"), \
+         patch(f"{_APP_MOD}._load_state", return_value=empty_state), \
+         patch(f"{_APP_MOD}._save_state"):
         mock_app.call = AsyncMock()
         mock_app.note = MagicMock()
 
@@ -640,7 +672,9 @@ async def test_repo_url_direct_param_overrides_config():
         )
 
         # Direct param should win
-        clone_args = mock_run.call_args[0][0]
+        assert mock_run.called
+        clone_call = mock_run.call_args_list[0]
+        clone_args = clone_call[0][0]
         assert "direct-repo" in clone_args[3]
 
 
@@ -681,7 +715,8 @@ async def test_branch_pushed_after_successful_improvements(temp_repo, sample_imp
     _save_state(temp_repo, state)
 
     with patch("swe_af.improve.app.app") as mock_app, \
-         patch("swe_af.improve.app._push_branch", return_value="improve/my-branch") as mock_push:
+         patch(f"{_APP_MOD}._setup_work_branch", return_value="improve/my-branch"), \
+         patch(f"{_APP_MOD}._push_branch", return_value="improve/my-branch") as mock_push:
         mock_app.note = MagicMock()
         mock_app.call = _make_improve_call_mock(
             pr_response={"success": True, "pr_url": "https://github.com/org/repo/pull/42", "pr_number": 42, "error_message": ""},
@@ -692,12 +727,13 @@ async def test_branch_pushed_after_successful_improvements(temp_repo, sample_imp
         result_obj = ImproveResult(**result)
         assert result_obj.remote_branch == "improve/my-branch"
         assert result_obj.pr_url == "https://github.com/org/repo/pull/42"
-        mock_push.assert_called_once_with(temp_repo)
+        # 1 per-commit push + 1 final safety push = 2
+        assert mock_push.call_count == 2
 
 
 @pytest.mark.asyncio
-async def test_push_and_pr_skipped_when_no_remote(temp_repo, sample_improvement):
-    """If repo has no remote, push returns empty and PR is skipped."""
+async def test_push_and_pr_skipped_when_no_improvements(temp_repo, sample_improvement):
+    """If no improvements completed, push and PR are skipped."""
     state = ImprovementState(
         repo_path=temp_repo,
         improvements=[sample_improvement],
@@ -706,25 +742,39 @@ async def test_push_and_pr_skipped_when_no_remote(temp_repo, sample_improvement)
     _save_state(temp_repo, state)
 
     with patch("swe_af.improve.app.app") as mock_app, \
-         patch("swe_af.improve.app._push_branch", return_value="") as mock_push:
+         patch(f"{_APP_MOD}._setup_work_branch", return_value="improve/test-branch"), \
+         patch(f"{_APP_MOD}._push_branch", return_value="") as mock_push:
         mock_app.note = MagicMock()
-        mock_app.call = _make_improve_call_mock()
+
+        # Executor fails so nothing completed
+        async def mock_call(*args, **kwargs):
+            call_name = args[0] if args else ""
+            if "validate" in call_name:
+                return {"is_valid": True, "reason": "Valid", "file_changes_detected": []}
+            elif "execute" in call_name:
+                return {
+                    "success": False, "commit_sha": None,
+                    "commit_message": "", "files_changed": [],
+                    "new_findings": [], "error": "Failed", "tests_passed": False,
+                    "verification_output": "",
+                }
+            return {}
+
+        mock_app.call = AsyncMock(side_effect=mock_call)
 
         result = await improve(repo_path=temp_repo, config={"max_improvements": 1})
 
         result_obj = ImproveResult(**result)
-        assert result_obj.remote_branch == ""
         assert result_obj.pr_url == ""
-        mock_push.assert_called_once()
-
-        # run_github_pr should NOT have been called (push failed)
-        call_args = [str(c) for c in mock_app.call.call_args_list]
-        assert not any("github_pr" in a for a in call_args)
+        # No push for failed improvements
+        mock_push.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_branch_pushed_but_pr_disabled(temp_repo, sample_improvement):
     """When enable_github_pr=False, branch is still pushed but no PR is created."""
+    from swe_af.improve import app as improve_app_module
+
     state = ImprovementState(
         repo_path=temp_repo,
         improvements=[sample_improvement],
@@ -732,10 +782,10 @@ async def test_branch_pushed_but_pr_disabled(temp_repo, sample_improvement):
     )
     _save_state(temp_repo, state)
 
-    with patch("swe_af.improve.app.app") as mock_app, \
-         patch("swe_af.improve.app._push_branch", return_value="improve/my-branch") as mock_push:
-        mock_app.note = MagicMock()
-        mock_app.call = _make_improve_call_mock()
+    with patch(f"{_APP_MOD}._setup_work_branch", return_value="improve/my-branch"), \
+         patch(f"{_APP_MOD}._push_branch", return_value="improve/my-branch") as mock_push, \
+         patch.object(improve_app_module.app, "call", new=_make_improve_call_mock()) as mock_call, \
+         patch.object(improve_app_module.app, "note", new=MagicMock()):
 
         result = await improve(
             repo_path=temp_repo,
@@ -746,10 +796,11 @@ async def test_branch_pushed_but_pr_disabled(temp_repo, sample_improvement):
         assert result_obj.remote_branch == "improve/my-branch"
         assert result_obj.pr_url == ""
 
-        # Push happened, but no PR call
-        mock_push.assert_called_once()
-        call_args = [str(c) for c in mock_app.call.call_args_list]
-        assert not any("github_pr" in a for a in call_args)
+        # Per-commit push + final safety push, but no PR call
+        assert mock_push.call_count == 2
+        # Check that run_github_pr was not called (only validate + execute)
+        call_names = [c[0][0] for c in mock_call.call_args_list]
+        assert not any("github_pr" in name for name in call_names)
 
 
 @pytest.mark.asyncio
@@ -763,21 +814,22 @@ async def test_pr_failure_is_non_fatal_branch_still_pushed(temp_repo, sample_imp
     _save_state(temp_repo, state)
 
     with patch("swe_af.improve.app.app") as mock_app, \
-         patch("swe_af.improve.app._push_branch", return_value="my-branch"):
+         patch(f"{_APP_MOD}._setup_work_branch", return_value="improve/my-branch"), \
+         patch(f"{_APP_MOD}._push_branch", return_value="improve/my-branch"):
         mock_app.note = MagicMock()
         mock_app.call = _make_improve_call_mock(pr_raises=RuntimeError("GitHub API down"))
 
         result = await improve(repo_path=temp_repo, config={"max_improvements": 1})
 
         result_obj = ImproveResult(**result)
-        assert result_obj.remote_branch == "my-branch"
+        assert result_obj.remote_branch == "improve/my-branch"
         assert result_obj.pr_url == ""
         assert len(result_obj.improvements_completed) == 1
 
 
 @pytest.mark.asyncio
 async def test_no_push_when_no_improvements_completed(temp_repo, sample_improvement):
-    """If no improvements completed, neither push nor PR should happen."""
+    """If no improvements completed, no final push or PR should happen."""
     state = ImprovementState(
         repo_path=temp_repo,
         improvements=[sample_improvement],
@@ -786,7 +838,8 @@ async def test_no_push_when_no_improvements_completed(temp_repo, sample_improvem
     _save_state(temp_repo, state)
 
     with patch("swe_af.improve.app.app") as mock_app, \
-         patch("swe_af.improve.app._push_branch") as mock_push:
+         patch(f"{_APP_MOD}._setup_work_branch", return_value="improve/test-branch"), \
+         patch(f"{_APP_MOD}._push_branch") as mock_push:
         mock_app.note = MagicMock()
 
         async def mock_call(*args, **kwargs):
@@ -807,8 +860,8 @@ async def test_no_push_when_no_improvements_completed(temp_repo, sample_improvem
         result = await improve(repo_path=temp_repo, config={"max_improvements": 1})
 
         result_obj = ImproveResult(**result)
-        assert result_obj.remote_branch == ""
         assert result_obj.pr_url == ""
+        # No per-commit pushes since execution failed; no final push either
         mock_push.assert_not_called()
 
 

@@ -20,7 +20,9 @@ from swe_af.improve.app import (
     _ensure_gitignore,
     _load_state,
     _pick_next_improvement,
+    _push_branch,
     _save_state,
+    _setup_work_branch,
     improve,
 )
 from swe_af.improve.schemas import (
@@ -30,6 +32,9 @@ from swe_af.improve.schemas import (
     ImprovementState,
 )
 
+# Module path for patching
+_APP_MOD = "swe_af.improve.app"
+
 
 @pytest.fixture
 def temp_repo(tmp_path):
@@ -37,6 +42,19 @@ def temp_repo(tmp_path):
     repo_path = tmp_path / "test-repo"
     repo_path.mkdir()
     return str(repo_path)
+
+
+@pytest.fixture(autouse=True)
+def _mock_git_branch_ops():
+    """Mock _setup_work_branch and _push_branch for all integration tests.
+
+    These require a real git repo; the loop tests focus on orchestration logic.
+    """
+    with (
+        patch(f"{_APP_MOD}._setup_work_branch", return_value="improve/20260318_abc123"),
+        patch(f"{_APP_MOD}._push_branch", return_value="improve/20260318_abc123"),
+    ):
+        yield
 
 
 @pytest.fixture
@@ -314,7 +332,7 @@ async def test_improve_first_run_triggers_scan(temp_repo):
                 mock_exec_result,  # execute_improvement
             ]
 
-            result = await improve(temp_repo, {"max_improvements": 1})
+            result = await improve(temp_repo, config={"max_improvements": 1})
 
     result_obj = ImproveResult(**result)
     assert len(result_obj.improvements_found) == 1
@@ -357,7 +375,7 @@ async def test_improve_loads_existing_state(temp_repo, sample_improvement):
                 mock_exec_result,  # execute_improvement
             ]
 
-            result = await improve(temp_repo, {"max_improvements": 1})
+            result = await improve(temp_repo, config={"max_improvements": 1})
 
     result_obj = ImproveResult(**result)
     assert len(result_obj.improvements_completed) == 1
@@ -392,7 +410,7 @@ async def test_improve_stale_detection(temp_repo):
 
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(return_value=mock_validate_result)):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
-            result = await improve(temp_repo, {"max_improvements": 1})
+            result = await improve(temp_repo, config={"max_improvements": 1})
 
     result_obj = ImproveResult(**result)
     assert len(result_obj.improvements_skipped) == 1
@@ -455,7 +473,7 @@ async def test_improve_budget_exhaustion(temp_repo):
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=call_handler)):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
             # Set very short budget (3 seconds)
-            result = await improve(temp_repo, {"max_time_seconds": 3, "max_improvements": 0})
+            result = await improve(temp_repo, config={"max_time_seconds": 3, "max_improvements": 0})
 
     result_obj = ImproveResult(**result)
     # Should complete some but not all due to budget
@@ -510,7 +528,7 @@ async def test_improve_max_improvements_limit(temp_repo):
 
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=results)):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
-            result = await improve(temp_repo, {"max_improvements": 2, "max_time_seconds": 300})
+            result = await improve(temp_repo, config={"max_improvements": 2, "max_time_seconds": 300})
 
     result_obj = ImproveResult(**result)
     assert len(result_obj.improvements_completed) == 2
@@ -567,7 +585,7 @@ async def test_improve_category_filter(temp_repo):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
             result = await improve(
                 temp_repo,
-                {"categories": ["code-quality"], "max_improvements": 1}
+                config={"categories": ["code-quality"], "max_improvements": 1}
             )
 
     result_obj = ImproveResult(**result)
@@ -611,7 +629,7 @@ async def test_improve_new_findings_appended(temp_repo, sample_improvement):
 
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=[mock_validate_result, mock_exec_result])):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
-            result = await improve(temp_repo, {"max_improvements": 1})
+            result = await improve(temp_repo, config={"max_improvements": 1})
 
     result_obj = ImproveResult(**result)
     assert len(result_obj.improvements_found) == 1
@@ -626,7 +644,7 @@ async def test_improve_new_findings_appended(temp_repo, sample_improvement):
 @pytest.mark.asyncio
 async def test_improve_invalid_repo_path():
     """Test improve with invalid repo_path returns error."""
-    result = await improve("/nonexistent/path", {})
+    result = await improve("/nonexistent/path", config={})
 
     result_obj = ImproveResult(**result)
     assert result_obj.stopped_reason == "error"
@@ -672,8 +690,9 @@ async def test_improve_timeout_calculation(temp_repo):
 
     async def capture_timeout(*args, **kwargs):
         nonlocal timeout_used
-        # Extract timeout from call arguments
-        timeout_used = kwargs.get("timeout_seconds")
+        # Only capture when timeout_seconds is actually passed (executor call)
+        if "timeout_seconds" in kwargs:
+            timeout_used = kwargs["timeout_seconds"]
         return mock_exec_result
 
     call_count = [0]
@@ -688,7 +707,7 @@ async def test_improve_timeout_calculation(temp_repo):
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=call_handler)):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
             # Set large budget (1000 seconds)
-            result = await improve(temp_repo, {"max_time_seconds": 1000, "max_improvements": 1})
+            result = await improve(temp_repo, config={"max_time_seconds": 1000, "max_improvements": 1})
 
     # Verify timeout was capped at 300
     assert timeout_used is not None
@@ -720,7 +739,7 @@ async def test_improve_run_record_saved(temp_repo, sample_improvement):
 
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=[mock_validate_result, mock_exec_result])):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
-            result = await improve(temp_repo, {"max_improvements": 1})
+            result = await improve(temp_repo, config={"max_improvements": 1})
 
     # Verify run record in result
     result_obj = ImproveResult(**result)
@@ -793,7 +812,7 @@ async def test_improve_stale_then_next_pending_executed(temp_repo):
         mock_exec_result,
     ])):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
-            result = await improve(temp_repo, {"max_improvements": 1})
+            result = await improve(temp_repo, config={"max_improvements": 1})
 
     result_obj = ImproveResult(**result)
     assert len(result_obj.improvements_skipped) == 1
@@ -829,7 +848,7 @@ async def test_improve_state_json_structure(temp_repo, sample_improvement):
 
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=[mock_validate_result, mock_exec_result])):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
-            result = await improve(temp_repo, {"max_improvements": 1})
+            result = await improve(temp_repo, config={"max_improvements": 1})
 
     # Load and verify JSON structure
     state_path = os.path.join(temp_repo, ".swe-af", "improvements.json")
@@ -920,7 +939,7 @@ async def test_improve_scanner_failure_resilience(temp_repo):
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(return_value=mock_scan_result)):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
             # Should not raise - should handle gracefully
-            result = await improve(temp_repo, {"max_improvements": 1})
+            result = await improve(temp_repo, config={"max_improvements": 1})
 
     result_obj = ImproveResult(**result)
     # Should complete without improvements since scanner returned empty
@@ -955,7 +974,7 @@ async def test_improve_validator_failure_resilience(temp_repo, sample_improvemen
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=[mock_validate_result, mock_exec_result])):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
             # Should not raise - should handle gracefully
-            result = await improve(temp_repo, {"max_improvements": 1})
+            result = await improve(temp_repo, config={"max_improvements": 1})
 
     # Loop should complete successfully even with validator fallback
     result_obj = ImproveResult(**result)
@@ -1001,7 +1020,7 @@ async def test_improve_executor_failure_resilience(temp_repo, sample_improvement
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=[mock_validate_result, mock_exec_failure, mock_scan_empty])):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
             # Should not raise - should handle gracefully
-            result = await improve(temp_repo, {"max_improvements": 1})
+            result = await improve(temp_repo, config={"max_improvements": 1})
 
     # Loop should complete without crashing, improvement marked as failed
     result_obj = ImproveResult(**result)
@@ -1083,7 +1102,7 @@ async def test_improve_multiple_failures_continue(temp_repo):
 
     with patch.object(improve_app_module.app, 'call', new=AsyncMock(side_effect=call_results)):
         with patch.object(improve_app_module.app, 'note', new=MagicMock()):
-            result = await improve(temp_repo, {"max_improvements": 3})
+            result = await improve(temp_repo, config={"max_improvements": 3})
 
     result_obj = ImproveResult(**result)
     # Should have 1 completed and 2 failed
@@ -1091,3 +1110,148 @@ async def test_improve_multiple_failures_continue(temp_repo):
     assert len(result_obj.improvements_failed) == 2
     # Loop processes all 3 (fail, success, fail) then finds no more improvements
     assert result_obj.stopped_reason == "no_more_improvements"
+
+
+# ---------------------------------------------------------------------------
+# Work-branch tests (use real git repos, opt out of the autouse mock)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    """Create a real git repo with an initial commit on 'main'."""
+    import subprocess
+
+    repo = str(tmp_path / "git-repo")
+    subprocess.run(["git", "init", "-b", "main", repo], check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True, capture_output=True)
+    # Initial commit so main exists
+    readme = os.path.join(repo, "README.md")
+    with open(readme, "w") as f:
+        f.write("# test\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+class TestSetupWorkBranch:
+    """Tests for _setup_work_branch (real git, no autouse mock)."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_autouse_mock(self):
+        """Override the autouse mock so these tests use real git."""
+        yield  # The autouse mock patches module-level functions;
+        # we call _setup_work_branch directly so the patch doesn't affect us.
+
+    def test_creates_branch_from_main(self, git_repo):
+        """Work branch is created from the base branch."""
+        cfg = ImproveConfig(branch="main")
+        with patch.object(__import__("swe_af.improve.app", fromlist=["app"]).app, "note", new=MagicMock()):
+            branch = _setup_work_branch(git_repo, cfg)
+
+        assert branch is not None
+        assert branch.startswith("improve/")
+        # Should now be on the work branch
+        import subprocess
+        current = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=git_repo, capture_output=True, text=True,
+        ).stdout.strip()
+        assert current == branch
+
+    def test_fails_when_base_branch_missing(self, git_repo):
+        """Returns None when the base branch doesn't exist."""
+        cfg = ImproveConfig(branch="nonexistent-branch")
+        with patch.object(__import__("swe_af.improve.app", fromlist=["app"]).app, "note", new=MagicMock()):
+            branch = _setup_work_branch(git_repo, cfg)
+
+        assert branch is None
+
+    def test_branch_name_format(self, git_repo):
+        """Branch name follows improve/<YYYYMMDD>_<random6> pattern."""
+        import re
+
+        cfg = ImproveConfig(branch="main")
+        with patch.object(__import__("swe_af.improve.app", fromlist=["app"]).app, "note", new=MagicMock()):
+            branch = _setup_work_branch(git_repo, cfg)
+
+        assert branch is not None
+        assert re.match(r"^improve/\d{8}_[a-z0-9]{6}$", branch)
+
+
+@pytest.mark.asyncio
+async def test_improve_fails_early_when_base_branch_missing(temp_repo):
+    """Improve returns error when the base branch is not found."""
+    from swe_af.improve import app as improve_app_module
+
+    # Override the autouse mock for this specific test
+    with (
+        patch(f"{_APP_MOD}._setup_work_branch", return_value=None),
+        patch.object(improve_app_module.app, "note", new=MagicMock()),
+    ):
+        result = await improve(temp_repo, config={"branch": "nonexistent"})
+
+    result_obj = ImproveResult(**result)
+    assert result_obj.stopped_reason == "error"
+    assert "not found" in result_obj.summary.lower()
+
+
+@pytest.mark.asyncio
+async def test_improve_result_contains_work_branch(temp_repo, sample_improvement):
+    """ImproveResult.remote_branch is the work branch name."""
+    from swe_af.improve import app as improve_app_module
+
+    state = ImprovementState(repo_path=temp_repo, improvements=[sample_improvement])
+    _save_state(temp_repo, state)
+
+    mock_validate_result = {"is_valid": True, "reason": "Valid", "file_changes_detected": []}
+    mock_exec_result = {
+        "success": True, "commit_sha": "abc123", "commit_message": "improve: test",
+        "files_changed": ["test.py"], "new_findings": [], "error": "",
+    }
+
+    with patch.object(improve_app_module.app, "call", new=AsyncMock(side_effect=[mock_validate_result, mock_exec_result])):
+        with patch.object(improve_app_module.app, "note", new=MagicMock()):
+            result = await improve(temp_repo, config={"max_improvements": 1, "enable_github_pr": False})
+
+    result_obj = ImproveResult(**result)
+    assert result_obj.remote_branch == "improve/20260318_abc123"
+
+
+@pytest.mark.asyncio
+async def test_push_called_after_each_commit(temp_repo, sample_improvement):
+    """_push_branch is called after each successful improvement commit."""
+    from swe_af.improve import app as improve_app_module
+
+    # Two pending improvements
+    imp2 = ImprovementArea(
+        id="test-improvement-2", category="code-quality", title="Refactor code",
+        description="Refactor", files=["code.py"], priority=4, status="pending",
+        found_by_run=datetime.now(timezone.utc).isoformat(),
+    )
+    state = ImprovementState(repo_path=temp_repo, improvements=[sample_improvement, imp2])
+    _save_state(temp_repo, state)
+
+    mock_validate = {"is_valid": True, "reason": "Valid", "file_changes_detected": []}
+    mock_exec = {
+        "success": True, "commit_sha": "abc123", "commit_message": "improve: test",
+        "files_changed": ["test.py"], "new_findings": [], "error": "",
+    }
+
+    with (
+        patch(f"{_APP_MOD}._push_branch", return_value="improve/20260318_abc123") as mock_push,
+        patch(f"{_APP_MOD}._setup_work_branch", return_value="improve/20260318_abc123"),
+        patch.object(improve_app_module.app, "call", new=AsyncMock(side_effect=[
+            mock_validate, mock_exec,  # first improvement
+            mock_validate, mock_exec,  # second improvement
+        ])),
+        patch.object(improve_app_module.app, "note", new=MagicMock()),
+    ):
+        result = await improve(temp_repo, config={"max_improvements": 2, "enable_github_pr": False})
+
+    result_obj = ImproveResult(**result)
+    assert len(result_obj.improvements_completed) == 2
+    # 2 per-commit pushes + 1 final safety push = 3
+    assert mock_push.call_count == 3
