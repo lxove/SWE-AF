@@ -10,6 +10,7 @@ from swe_af.agent_ai.types import Tool
 from swe_af.improve import improve_router
 from swe_af.improve.prompts import EXECUTOR_SYSTEM_PROMPT, executor_task_prompt
 from swe_af.improve.schemas import ExecutorResult, ImproveConfig, improve_resolve_models
+from swe_af.improve.metrics_util import extract_step_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,9 @@ async def execute_improvement(
                 f"success={result.success}",
                 tags=["improve_executor", "complete"],
             )
-            return result.model_dump()
+            out = result.model_dump()
+            out["_metrics"] = extract_step_metrics(response, executor_model)
+            return out
 
         # If parsed is None, treat as error
         _note(

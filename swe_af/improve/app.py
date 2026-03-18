@@ -22,6 +22,7 @@ from agentfield import Agent
 from swe_af.execution.envelope import unwrap_call_result as _unwrap
 from swe_af.execution.schemas import _derive_repo_name as _repo_name_from_url
 from swe_af.improve import improve_router
+from swe_af.improve.metrics_util import UsageAccumulator
 from swe_af.improve.schemas import (
     ImproveConfig,
     ImproveResult,
@@ -338,6 +339,7 @@ async def improve(
     found: list[ImprovementArea] = []
     skipped: list[ImprovementArea] = []
     failed: list[ImprovementArea] = []
+    usage_acc = UsageAccumulator()
 
     app.note(
         f"Improve loop starting: repo={repo_path}, branch={work_branch}, max_time={cfg.max_time_seconds}s",
@@ -370,6 +372,7 @@ async def improve(
                 existing_improvements=[imp.model_dump() for imp in state.improvements],
             )
             scan_result = _unwrap(raw_scan, "scan_for_improvements")
+            usage_acc.add(scan_result.pop("_metrics", None))
 
             new_areas = scan_result.get("new_areas", [])
             for area_dict in new_areas:
@@ -399,6 +402,7 @@ async def improve(
             config=cfg.model_dump(),
         )
         validate_result = _unwrap(raw_validate, "validate_improvement")
+        usage_acc.add(validate_result.pop("_metrics", None))
 
         if not validate_result.get("is_valid", True):
             # Mark as stale and continue
@@ -428,6 +432,7 @@ async def improve(
             config=cfg.model_dump(),
         )
         exec_result = _unwrap(raw_exec, "execute_improvement")
+        usage_acc.add(exec_result.pop("_metrics", None))
 
         if exec_result.get("success", False):
             # Mark completed
@@ -476,6 +481,9 @@ async def improve(
     elif not _within_budget(start_time, cfg):
         stopped_reason = "budget_exhausted"
 
+    # Build usage summary
+    usage_summary = usage_acc.to_summary()
+
     # Record run
     budget_used = time.time() - start_time
     run_record = RunRecord(
@@ -486,15 +494,19 @@ async def improve(
         improvements_skipped=len(skipped),
         budget_used_seconds=budget_used,
         stopped_reason=stopped_reason,
+        usage=usage_summary,
     )
     state.runs.append(run_record)
     _save_state(repo_path, state)
 
+    usage_line = usage_acc.format_summary_line()
     summary = (
         f"Completed {len(completed)}, found {len(found)}, "
         f"skipped {len(skipped)}, failed {len(failed)} improvements. "
         f"Stopped: {stopped_reason}"
     )
+    if usage_line:
+        summary += f"\nToken usage: {usage_line}"
 
     app.note(f"Improve loop finished: {summary}", tags=["improve", "loop", "done"])
 
@@ -515,6 +527,7 @@ async def improve(
         stopped_reason=stopped_reason,
         summary=summary,
         run_record=run_record,
+        usage=usage_summary,
         remote_branch=work_branch,
         pr_url=pr_url,
     ).model_dump()

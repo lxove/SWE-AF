@@ -14,6 +14,7 @@ from swe_af.agent_ai.types import Tool
 from swe_af.improve import improve_router
 from swe_af.improve.prompts import VALIDATOR_SYSTEM_PROMPT, validator_task_prompt
 from swe_af.improve.schemas import ImproveConfig, ValidatorResult, improve_resolve_models
+from swe_af.improve.metrics_util import extract_step_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -125,4 +126,6 @@ async def validate_improvement(
         f"validate_improvement: completed for {improvement_id!r}, is_valid={result.is_valid}",
         tags=["validator", "complete", f"improvement_id:{improvement_id}"],
     )
-    return result.model_dump()
+    out = result.model_dump()
+    out["_metrics"] = extract_step_metrics(response, validator_model)
+    return out

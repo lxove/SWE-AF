@@ -513,7 +513,9 @@ class TestEdgeCases:
                 existing_improvements=[],
             ))
 
-        # Should be able to parse back
+        # Pop internal sideband metrics before validating as ScanResult
+        metrics = result.pop("_metrics", None)
+        assert metrics is not None, "_metrics should be present in raw result"
         parsed = ScanResult.model_validate(result)
         assert parsed.scan_depth_used == "normal"
         assert parsed.summary == "Test scan"

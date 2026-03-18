@@ -50,6 +50,29 @@ class ImprovementArea(BaseModel):
     notes: str = ""                      # additional context (file hashes, etc.)
 
 
+class ModelUsage(BaseModel):
+    """Token usage for a single model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str                           # model name/alias used
+    input_tokens: int = 0               # total input tokens
+    output_tokens: int = 0              # total output tokens
+    cost_usd: float = 0.0              # total cost in USD
+    num_calls: int = 0                  # number of AI invocations
+
+
+class UsageSummary(BaseModel):
+    """Aggregated token usage across all models for a run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    by_model: list[ModelUsage] = []      # per-model breakdown
+    total_input_tokens: int = 0          # sum across all models
+    total_output_tokens: int = 0         # sum across all models
+    total_cost_usd: float = 0.0          # sum across all models
+
+
 class RunRecord(BaseModel):
     """Metadata for a single improve loop invocation."""
 
@@ -62,6 +85,7 @@ class RunRecord(BaseModel):
     improvements_skipped: int = 0        # count marked stale/skipped
     budget_used_seconds: float = 0.0     # wall-clock time consumed
     stopped_reason: str = ""             # why loop terminated
+    usage: UsageSummary | None = None    # token usage summary
 
 
 class ImprovementState(BaseModel):
@@ -148,6 +172,7 @@ class ImproveResult(BaseModel):
     ]
     summary: str                           # human-readable summary
     run_record: RunRecord                  # this run's metadata
+    usage: UsageSummary | None = None      # token usage summary
     remote_branch: str = ""                # remote branch pushed to (if any)
     pr_url: str = ""                       # draft PR URL (if created)
 

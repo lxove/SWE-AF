@@ -13,6 +13,7 @@ from swe_af.agent_ai import AgentAI, AgentAIConfig, Tool
 from swe_af.improve import improve_router
 from swe_af.improve.prompts import SCANNER_SYSTEM_PROMPT, scanner_task_prompt
 from swe_af.improve.schemas import ImproveConfig, ScanResult, improve_resolve_models
+from swe_af.improve.metrics_util import extract_step_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -115,4 +116,6 @@ async def scan_for_improvements(
         tags=["scanner", "complete"],
     )
 
-    return scan_result.model_dump()
+    out = scan_result.model_dump()
+    out["_metrics"] = extract_step_metrics(response, scanner_model)
+    return out
